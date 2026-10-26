@@ -1,0 +1,32 @@
+#pragma code_page(65001)
+#include <winver.h>
+
+IDI_ICON1 ICON DISCARDABLE "ltool.ico"
+
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION HOTARU_VERSION_MAJOR,HOTARU_VERSION_MINOR,HOTARU_VERSION_PATCH,0
+ PRODUCTVERSION HOTARU_VERSION_MAJOR,HOTARU_VERSION_MINOR,HOTARU_VERSION_PATCH,0
+ FILEFLAGSMASK VS_FFI_FILEFLAGSMASK
+ FILEFLAGS 0
+ FILEOS VOS_NT_WINDOWS32
+ FILETYPE VFT_APP
+ FILESUBTYPE VFT2_UNKNOWN
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "080404b0"
+        BEGIN
+            VALUE "FileDescription", "萤 Hotaru 桌面启动器"
+            VALUE "FileVersion", LTOOL_VERSION
+            VALUE "InternalName", "Hotaru"
+            VALUE "OriginalFilename", "Hotaru.exe"
+            VALUE "ProductName", "萤 Hotaru"
+            VALUE "ProductVersion", LTOOL_VERSION
+            VALUE "Comments", "基于 mateo-ki/ltool 二次开发，遵循 Apache-2.0 许可证"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x0804, 1200
+    END
+END

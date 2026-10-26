@@ -1,0 +1,268 @@
+name: Build plugins
+
+# 编出插件 dll + 一份 dist/index.json。
+# **ltool 1.3.0 起商店不再读这个仓库的 dist/**：那批 dll 是手工把本机构建产物提交进 git 的
+# （最后一次 10-16），core 之后一直没停 —— 磁盘清理闪退、注册表/开机分析点不开都从这儿来（#91）。
+# 商店现在读主仓库那次发版的资产（tools/make_plugin_index.py 生成，和 ltoolcore.dll 同一次构建）。
+# 这一行下面的 12/14 数字也别信：这份是**主仓库里存的镜像**，插件仓库那头的已经飘了。
+# 这条流水线的**源在本仓库 plugin-ci/build.yml**，插件仓库（https://github.com/mateo-ki/ltool_plugin）
+# 的 .github/workflows/build.yml 是它的副本 —— 改这里，再连同 ci/annotate-fail.sh 一起拷过去提交。
+#
+# 依赖装法照 D:\project\cpp\vcc 那份 CI：**vcpkg classic 模式 + 显式端口清单**，
+# 并把 vcpkg 自己钉在一个 commit 上。
+#
+# 核心优化项：
+# 1. 快速失败（Fail-Fast）：将秒级完成的 SDK 检查与 dist 自洽性校验提前到最前面，3秒内发现问题，不用等一小时。
+# 2. 修复 Windows 下 Python 输出中文导致的 UnicodeEncodeError (charmap / cp1252 编码异常)。
+# 3. 仅编 Release（注入 VCPKG_BUILD_TYPE release），彻底跳过 Debug 版编译，安装耗时减少 50%。
+# 4. 依赖安装完毕后立即 actions/cache/save 保存缓存，避免因后续步骤中断丢失耗时编译的 Qt 依赖。
+# 5. vcpkg 浅克隆 + 命中缓存时跳过重复 bootstrap。
+# 6. 激活完整的本地二进制归档与下载缓存目录，双层缓存持久化。
+# 7. MSBuild / VS 生成器调优，控制并发度避免 2 核 Windows runner 内存颠簸。
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "p*"
+  workflow_dispatch:
+
+# 同一个 ref 只留最新一次：连推几次 main，后面那次把前面还在跑的顶掉。
+concurrency:
+  group: plugins-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHONUTF8: "1"
+  PYTHONIOENCODING: "utf-8"
+  PLUGINS_VCPKG: ${{ github.workspace }}/.ci/vcpkg
+  # 钉的是本机那棵 vcpkg 树所在的 commit（git -C D:/vcpkg log -1 --format=%H）
+  PLUGINS_VCPKG_SHA: e64546260d40765da00e64390b19fcade13f3986
+  VCPKG_PORTS: qtbase
+  QT_MUST_BE: "6.10.2"
+  VCPKG_DOWNLOADS: ${{ github.workspace }}/.ci/vcpkg_downloads
+  VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}/.ci/vcpkg_archives
+  # 二进制缓存：同时启用 Actions 缓存与本地目录缓存双保险
+  VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite;files,${{ github.workspace }}/.ci/vcpkg_archives,readwrite"
+
+jobs:
+  windows:
+    runs-on: windows-2022
+    timeout-minutes: 360
+    permissions:
+      contents: read
+      actions: write      # vcpkg 的 x-gha 二进制缓存要写
+    steps:
+      - uses: actions/checkout@v4
+
+      # ---------------- 快速前置验证（Fail-Fast，秒级完成） ----------------
+      # sdk/ 是主仓库 tools/make_sdk.py 生成的快照（core 公开的头 + ltoolcore.lib + 那半份构建函数）。
+      - name: 验 SDK 快照
+        shell: bash
+        run: |
+          for f in include/ltool-plugin.h include/core-api.h include/Utils.h lib/ltoolcore.lib ltool-plugin.cmake INFO.txt; do
+            test -f "sdk/$f" || { echo "::error::sdk/ 缺 $f —— 回主仓库跑 tools/make_sdk.py 重新生成"; exit 1; }
+          done
+          api="$(grep -oE 'LTOOL_PLUGIN_API_VERSION +[0-9]+' sdk/include/ltool-plugin.h | grep -oE '[0-9]+$')"
+          if [ "$api" != "4" ]; then
+            echo "::error::sdk/ 那份接口是 API $api，本仓库按 API 4 编 —— 同样是要更新 sdk/"
+            exit 1
+          fi
+          echo "sdk/ 在位：API $api，$(ls sdk/include/*.h | wc -l) 个头，导入库 $(( $(wc -c < sdk/lib/ltoolcore.lib) / 1024 )) KB"
+
+      - name: 装 Python（校验 dist/ 和生成 index.json 都要用）
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # 商店装之前是按 index.json 里那个 sha256 校验下载到的 dll 的。
+      # 在编之前先把这份自洽性验掉（秒级，不用等一小时），并修复 cp1252 编码问题。
+      - name: 验 dist/ 那份清单和 dll 对得上
+        shell: bash
+        env:
+          PYTHONUTF8: "1"
+          PYTHONIOENCODING: "utf-8"
+        run: |
+          python - <<'PY'
+          import hashlib, json, os, sys
+          if hasattr(sys.stdout, 'reconfigure'):
+              sys.stdout.reconfigure(encoding='utf-8')
+          if hasattr(sys.stderr, 'reconfigure'):
+              sys.stderr.reconfigure(encoding='utf-8')
+
+          idx = json.load(open('dist/index.json', encoding='utf-8'))
+          bad = []
+          for p in idx['plugins']:
+              f = os.path.join('dist', p['file'])
+              if not os.path.isfile(f):
+                  bad.append(f"{p['id']}: dist/ 里没有 {p['file']}")
+                  continue
+              h = hashlib.sha256()
+              with open(f, 'rb') as fh:
+                  for blk in iter(lambda: fh.read(1 << 20), b''):
+                      h.update(blk)
+              if h.hexdigest() != p['sha256']:
+                  bad.append(f"{p['id']}: 哈希对不上（清单 {p['sha256'][:12]}… ≠ 文件 {h.hexdigest()[:12]}…）")
+              elif os.path.getsize(f) != p['bytes']:
+                  bad.append(f"{p['id']}: 字节数对不上（清单 {p['bytes']} ≠ 文件 {os.path.getsize(f)}）")
+          if bad:
+              print('::error::dist/index.json 与 dist/*.dll 不同源 —— 重跑 tools/make_index.py 并把两份一起提交')
+              print('\n'.join('  ' + b for b in bad))
+              sys.exit(1)
+          print(f"dist/ 自洽：{len(idx['plugins'])} 个插件的 sha256 与字节数逐个对上")
+          PY
+
+      # ---------------- vcpkg 依赖环境与缓存 ----------------
+      - name: 给 vcpkg 的 x-gha 缓存导出凭据
+        uses: actions/github-script@v7
+        with:
+          script: |
+            core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
+            core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
+
+      - name: 恢复 vcpkg 依赖缓存
+        id: cache-vcpkg
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ${{ env.PLUGINS_VCPKG }}
+            ${{ env.VCPKG_DOWNLOADS }}
+            ${{ env.VCPKG_DEFAULT_BINARY_CACHE }}
+          key: vcpkg-classic-${{ runner.os }}-${{ env.PLUGINS_VCPKG_SHA }}-${{ env.VCPKG_PORTS }}
+          restore-keys: |
+            vcpkg-classic-${{ runner.os }}-${{ env.PLUGINS_VCPKG_SHA }}
+
+      - name: 把 MSVC / CMake 摆上 PATH
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: 按钉住的 commit 起 vcpkg
+        shell: bash
+        env:
+          VCPKG_ROOT: ${{ env.PLUGINS_VCPKG }}
+        run: |
+          git config --global core.longpaths true
+          mkdir -p "$PLUGINS_VCPKG"
+          if [ ! -d "$PLUGINS_VCPKG/.git" ]; then
+            git -C "$PLUGINS_VCPKG" init
+            git -C "$PLUGINS_VCPKG" remote add origin https://github.com/microsoft/vcpkg
+          fi
+          curr_sha="$(git -C "$PLUGINS_VCPKG" rev-parse HEAD 2>/dev/null || true)"
+          if [ "$curr_sha" != "$PLUGINS_VCPKG_SHA" ]; then
+            if git -C "$PLUGINS_VCPKG" fetch --depth 1 origin "$PLUGINS_VCPKG_SHA"; then
+              git -C "$PLUGINS_VCPKG" checkout --detach FETCH_HEAD
+            else
+              echo "::warning::拉不到 vcpkg $PLUGINS_VCPKG_SHA，改用分支 tip"
+            fi
+          fi
+          if [ ! -f "$PLUGINS_VCPKG/vcpkg.exe" ]; then
+            "$PLUGINS_VCPKG/bootstrap-vcpkg.bat" -disableMetrics
+          fi
+
+      - name: 装依赖
+        shell: bash
+        env:
+          VCPKG_ROOT: ${{ env.PLUGINS_VCPKG }}
+          VCPKG_MAX_CONCURRENCY: "2"
+        run: |
+          set +e
+          mkdir -p "$VCPKG_DEFAULT_BINARY_CACHE" "$VCPKG_DOWNLOADS"
+          if ! grep -q "VCPKG_BUILD_TYPE release" "$PLUGINS_VCPKG/triplets/x64-windows.cmake"; then
+            echo "set(VCPKG_BUILD_TYPE release)" >> "$PLUGINS_VCPKG/triplets/x64-windows.cmake"
+          fi
+          "$PLUGINS_VCPKG/vcpkg.exe" version
+          "$PLUGINS_VCPKG/vcpkg.exe" install --triplet x64-windows --clean-after-build --no-print-usage $VCPKG_PORTS > install.log 2>&1
+          status=$?
+          tail -n 40 install.log
+          sh ci/annotate-fail.sh "$status" "vcpkg install" install.log
+          exit $status
+
+      - name: 立即保存已安装的 vcpkg 依赖缓存
+        uses: actions/cache/save@v4
+        if: steps.cache-vcpkg.outputs.cache-hit != 'true'
+        with:
+          path: |
+            ${{ env.PLUGINS_VCPKG }}
+            ${{ env.VCPKG_DOWNLOADS }}
+            ${{ env.VCPKG_DEFAULT_BINARY_CACHE }}
+          key: vcpkg-classic-${{ runner.os }}-${{ env.PLUGINS_VCPKG_SHA }}-${{ env.VCPKG_PORTS }}
+
+      - name: 验 Qt 就是宿主那一份版本
+        shell: bash
+        env:
+          VCPKG_ROOT: ${{ env.PLUGINS_VCPKG }}
+        run: |
+          raw="$("$PLUGINS_VCPKG/vcpkg.exe" list | tr -d '\r' | awk '/^qtbase:/{print $2; exit}')"
+          got="${raw%%#*}"
+          echo "vcpkg 里的 qtbase = [$got]（要求 $QT_MUST_BE）"
+          if [ -z "$got" ]; then
+            echo "::error::vcpkg list 里没有 qtbase 那一行 —— 上一步的装依赖其实没装上，先看那一步的日志"
+            exit 1
+          fi
+          if [ "$got" != "$QT_MUST_BE" ]; then
+            echo "::error::qtbase 是 $got 不是 $QT_MUST_BE —— 要改就改 PLUGINS_VCPKG_SHA（对齐本机那棵树），别改这里"
+            exit 1
+          fi
+
+      # ---------------- 插件编译与打包 ----------------
+      # 生成器钉 Visual Studio 17 2022 多配置
+      - name: 配置并编出 12 个 dll
+        shell: bash
+        env:
+          VCPKG_ROOT: ${{ env.PLUGINS_VCPKG }}
+        run: |
+          set +e
+          cmake -S . -B build -G "Visual Studio 17 2022" -A x64 \
+            -DCMAKE_TOOLCHAIN_FILE="$PLUGINS_VCPKG/scripts/buildsystems/vcpkg.cmake" \
+            -DVCPKG_TARGET_TRIPLET=x64-windows > configure.log 2>&1
+          status=$?
+          if [ $status -eq 0 ]; then
+            cmake --build build --config Release --parallel 4 -- -v:m -p:CL_MPcount=2 > build.log 2>&1
+            status=$?
+          fi
+          tail -n 40 configure.log
+          tail -n 40 build.log 2>/dev/null || true
+          sh ci/annotate-fail.sh "$status" "build" build.log
+          exit $status
+
+      - name: 一个 dll 都不许缺
+        shell: bash
+        run: |
+          miss=""
+          for d in plugins/*/; do
+            id="$(basename "$d")"
+            test -f "build/plugins/ltool-$id.dll" || miss="$miss ltool-$id.dll"
+          done
+          if [ -n "$miss" ]; then echo "::error::缺产物：$miss"; exit 1; fi
+          ls -l build/plugins/ltool-*.dll | awk '{print $5, $9}'
+
+      - name: 生成 index.json（每 dll 的 SHA256 从产物现算）
+        shell: bash
+        env:
+          PYTHONUTF8: "1"
+          PYTHONIOENCODING: "utf-8"
+        run: |
+          set -e
+          python tools/make_index.py --build build/plugins --src plugins \
+            --out dist/index.json --sdk-info sdk/INFO.txt \
+            --base-url "https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/main/dist"
+          head -c 400 dist/index.json
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ltool-plugins-${{ github.sha }}
+          path: |
+            build/plugins/ltool-*.dll
+            dist/index.json
+          if-no-files-found: error
+
+      - name: 失败时把各段日志留成 artifact
+        if: failure()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: plugin-build-logs
+          path: |
+            install.log
+            configure.log
+            build.log

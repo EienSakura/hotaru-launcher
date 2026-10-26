@@ -1,0 +1,82 @@
+# Prerequisites
+*.d
+
+# Compiled Object files
+*.slo
+*.lo
+*.o
+*.obj
+
+# Precompiled Headers
+*.gch
+*.pch
+
+# Linker files
+*.ilk
+
+# Debugger Files
+*.pdb
+
+# Compiled Dynamic libraries
+*.so
+*.dylib
+*.dll
+*.so.*
+
+# Fortran module files
+*.mod
+*.smod
+
+# Compiled Static libraries
+*.lai
+*.la
+*.a
+*.lib
+
+# Executables
+*.exe
+*.out
+*.app
+
+# 构建、缓存与本地验证资料
+/build/
+build-*/
+
+# CMake generated files
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+install_manifest.txt
+compile_commands.json
+
+# Temporary files
+*.tmp
+*.log
+*.bak
+*.swp
+
+# vcpkg
+vcpkg_installed/
+
+# debug information files
+*.dwo
+
+# test output & cache
+Testing/
+.cache/
+
+# Hotaru 发布产物只留本地
+# 安装包产物（21MB，每次交付都重打），只留源码
+installer/
+# tools/make_sdk.py 铺出来的 SDK 快照目录（发版产物，不进仓库）
+sdk-out/
+out/
+*.user
+.vs/
+# 恢复工程时留下的重复副本（和 README.md 同一份内容）
+README (1).md
+.idea/
+
+__pycache__/
+*.pyc

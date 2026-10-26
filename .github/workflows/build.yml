@@ -1,0 +1,528 @@
+name: Build and Release
+
+# 推 v* 标签 → 编 Release、跑无界面回归、打安装包、发一个 GitHub Release；
+# 推 hotaru/dev、hotaru/main 或手动跑 → 只做前三件事，不发布（所以这条工作流可以随时验包，不必先承诺发版）。
+#
+# 预发/稳定就靠标签本身分：v0.8.1-beta.1 建的 Release 自动标 pre-release，
+# v0.8.1 建的是稳定版。界面「检查更新」打的是 /releases/latest，GitHub 实测会跳过
+# draft 和 pre-release（拿 microsoft/PowerToys 对过：列表里最新是 v0.102.2862.0 pre=True，
+# 而 latest 回的是 v0.101.2362.0），所以预发不会推给走稳定通道的人。
+#
+# 依赖走 **清单模式**（和这台机器上一模一样）：仓库根有 vcpkg.json，配 CMake 时 vcpkg
+# 自己按 builtin-baseline 装。vcc 那边踩过的是经典模式的两道 paperwork，这儿不复现一遍：
+# 先把 vcpkg 树 checkout 到 baseline 那个 commit（--depth 1 只 clone tip 会找不到 baseline），
+# baseline 从 vcpkg.json 里读，不在本文件里抄第二份。
+
+on:
+  push:
+    tags:
+      - "v*"
+    branches:
+      - hotaru/dev
+      - hotaru/main
+  workflow_dispatch:
+    inputs:
+      package_plugins:
+        description: "额外构建和打包插件（需自行验证适配，不放入默认安装器）"
+        type: boolean
+        default: false
+
+
+# 同一个 ref 上只留最新那一次：连推几次 main，后面那次把前面还在跑的**取消掉**。
+# 一台 windows-2022 runner 一次只能跑一个作业，而清单模式装依赖 + 编 qtbase 是小时级的 ——
+# 不顶掉的话，四个旧提交会把队排队把最新那个压到最后面（2026-10-15 实测同时在跑 5 个）。
+# 按 ref 分组，所以推标签发版不会被同分支的另一条顶掉（不同 tag 是不同的 group）。
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHONIOENCODING: utf-8
+  PYTHONUTF8: "1"
+  HOTARU_PACKAGE_PLUGINS: ${{ inputs.package_plugins == true && 'ON' || 'OFF' }}
+  # 故意不叫 VCPKG_ROOT：ilammy/msvc-dev-cmd 会把 VCPKG_ROOT 导出成 VS 自带那份 vcpkg，
+  # 后面用到它的 step 会静默换成系统树（表现为 toolchain 路径变成 Program Files 底下）。
+  #
+  # 而且必须放在工作区内：actions/cache 对 GITHUB_WORKSPACE 之外的路径**静默不保存**，
+  # 上一版放外面，结果这个仓库一个缓存条目都没存下，每次 run 都重编一遍 Qt（约一小时）。
+  LTOOL_VCPKG: ${{ github.workspace }}/.ci/vcpkg
+  VCPKG_DOWNLOADS: ${{ github.workspace }}/.ci/vcpkg_downloads
+  VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}/.ci/vcpkg_archives
+  # vcpkg 只使用文件缓存，由 actions/cache 保存目录；不使用已移除的 x-gha 后端。
+  VCPKG_BINARY_SOURCES: "clear;files,${{ github.workspace }}/.ci/vcpkg_archives,readwrite"
+
+jobs:
+  windows:
+    runs-on: windows-2022
+    timeout-minutes: 180
+    # 发布安装包和独立主题附件需要写入 Release。
+    permissions:
+      contents: write
+
+    steps:
+      # fetch-depth: 0 + fetch-tags 是给下面那道插件版本闸的：它拿最近一个 tag 当基线比源码改动，
+      # 默认那次浅克隆（depth 1，不带 tag）里 git describe 直接失败 —— 脚本会报 GATE_BASELINE=none 并红，
+      # 而不是假装绿。整个仓库 97 个提交，全量 checkout 实测多花不到十秒。
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      # 只下载固定基线供检查，不将上游提交合入 Hotaru 发布历史。
+      - name: 读取上游兼容基线
+        shell: bash
+        run: |
+          base="$(cat tools/upstream-base.txt)"
+          [[ "$base" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::上游基线格式无效"; exit 1; }
+          if ! git cat-file -e "$base^{commit}" 2>/dev/null; then
+            git fetch --no-tags --depth=1 https://github.com/mateo-ki/ltool.git "$base"
+          fi
+
+      - name: 插件版本闸（每颗自己递增）
+        shell: bash
+        run: |
+          # 全新个人仓库不推送上游版本标签，首版从固定上游基线比较。
+          base="$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || cat tools/upstream-base.txt)"
+          bash tools/plugin_version_gate.sh "$base"
+
+      - name: 代理闸（每处新建 QNetworkAccessManager 都要有代理决定）
+        shell: bash
+        run: bash tools/proxy_gate.sh
+
+      - name: 配色闸（src/ 里每处挂样式表都必须走 Theme 的角色名）
+        shell: bash
+        run: bash tools/theme_gate.sh
+
+      # 发版说明那两份说明文字里不许带家目录 + 用户名。
+      # 为什么放在"每推都跑"这一栏而不是发版那一次：CI 的发布步骤会把每笔提交的**正文**原样
+      # 拼进公开 Release 页，而这个仓库的正文本来就写着实测路径（本机就有过一句
+      # 「旧目录 C:\Users\<名字>\AppData\Roaming\ltool 原样在那儿」）。
+      # 只在推 tag 那次才量的话，漏出去的那一版已经发出去了。
+      - name: 发版说明脱敏闸（家目录/用户名不进公开 Release 页）
+        shell: bash
+        env:
+          PYTHONUTF8: "1"
+          PYTHONIOENCODING: "utf-8"
+        run: |
+          python tools/make_release_notes.py --check
+          python tools/notes_history_leak_check.py "$(cat tools/upstream-base.txt)..HEAD"
+
+      # 上面那两道管的是"生成出来的发版说明"，这一道管的是**仓库本体**：git 带走的每一张文件
+      # （探针、夹具、文档、注释）里都不许活着一个真用户名。10-22 查出来的形状是
+      # `build/verify` 那 16 个一次性探针从 10 月起就带着真账号在公开仓库里 ——
+      # `.gitignore` 那条只挡了 `*.sh`，对已跟踪的 .ps1/.py/.js 既不挡也不生效，所以这里立闸而不是补注释。
+      - name: 公开面闸（git 带走的每张文件不许有真用户名/家目录）
+        shell: bash
+        env:
+          PYTHONUTF8: "1"
+          PYTHONIOENCODING: "utf-8"
+        run: python tools/tracked_leak_check.py
+
+      # 接口号闸：core 公开的头动了布局（加/删数据成员或虚函数）却没升 LTOOL_PLUGIN_API_VERSION
+      # 就是红。10-20 那次磁盘清理闪退走的就是这条路 —— 老插件名字全齐、LoadLibrary 成功、
+      # 按老偏移读 DiskScan::Tree 然后 0xc0000005；这一道保证下次再动布局必须升号，
+      # 而升了号，商店那批对不上 core 的产物会被认出来并拒绝，不是放进来崩。
+      # 顺带盯 19 份 plugin.json 里手抄的那个 Api 和头里的数一致。
+      - name: 插件接口号闸（动了公开面就得升号）
+        shell: bash
+        env:
+          PYTHONUTF8: "1"
+          PYTHONIOENCODING: "utf-8"
+        run: python tools/core_abi_gate.py
+
+      # 关键优化：把 build/vcpkg_installed 加入缓存！
+      # 使用 actions/cache/restore@v4 恢复，安装完依赖后立即用 cache/save 保存，
+      # 避免后续步骤哪怕遇到网络/取消等意外时导致几十分钟编译的依赖被全部丢弃。
+      - name: 恢复 vcpkg 依赖缓存
+        id: cache-vcpkg
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ${{ env.LTOOL_VCPKG }}
+            build/vcpkg_installed
+            ${{ env.VCPKG_DOWNLOADS }}
+            ${{ env.VCPKG_DEFAULT_BINARY_CACHE }}
+          key: vcpkg-${{ runner.os }}-${{ hashFiles('vcpkg.json') }}
+          restore-keys: |
+            vcpkg-${{ runner.os }}-
+
+      - name: 把 vcpkg 钉到 vcpkg.json 里的 builtin-baseline
+        shell: bash
+        run: |
+          git config --global core.longpaths true
+          sha="$(grep -oE '"builtin-baseline": *"[0-9a-f]+"' vcpkg.json | grep -oE '[0-9a-f]{40}')"
+          if [ -z "$sha" ]; then echo "::error::vcpkg.json 里读不到 builtin-baseline"; exit 1; fi
+          echo "钉住的 vcpkg commit = $sha"
+          mkdir -p "$LTOOL_VCPKG"
+          # 优化：不要全量 clone 微软仓库，通过 init + 单 commit 浅 fetch 秒级完成
+          if [ ! -d "$LTOOL_VCPKG/.git" ]; then
+            git -C "$LTOOL_VCPKG" init
+            git -C "$LTOOL_VCPKG" remote add origin https://github.com/microsoft/vcpkg
+          fi
+          curr_sha="$(git -C "$LTOOL_VCPKG" rev-parse HEAD 2>/dev/null || true)"
+          if [ "$curr_sha" != "$sha" ]; then
+            git -C "$LTOOL_VCPKG" fetch --depth 1 origin "$sha"
+            git -C "$LTOOL_VCPKG" checkout --detach FETCH_HEAD
+          fi
+          # 缓存命中时已有 vcpkg.exe 则跳过 bootstrap，省去几十秒重复构建
+          if [ ! -f "$LTOOL_VCPKG/vcpkg.exe" ]; then
+            "$LTOOL_VCPKG/bootstrap-vcpkg.bat" -disableMetrics
+          fi
+
+      # 显式按清单装依赖：
+      # 1. 解耦 vcpkg 安装与 CMake 配置，进度与报错完全清晰可见
+      # 2. 缓存命中时，vcpkg 扫描清单仅需 2~3 秒即可判定已就绪并快速通过
+      # 3. 核心提速：CI 只需要 Release 产物（打包/自测全走 Release）。注入 VCPKG_BUILD_TYPE release
+      #    彻底跳过 Debug 版编译（从 66 个构建任务腰斩至 33 个），从 80+ 分钟直接降至 30 分钟内！
+      # 4. 依赖变更或未命中时，--clean-after-build 避免保留庞大源码编译树，防止磁盘溢出
+      #
+      # 那两棵目录**必须先 mkdir**：VCPKG_DEFAULT_BINARY_CACHE 指着不存在的目录时 vcpkg 不是"没有缓存"
+      # 而是当场拒绝干活 —— `error: Environment variable VCPKG_DEFAULT_BINARY_CACHE must be a directory`
+      # （run 38648353323 就是这么红的：缓存 miss，actions/cache 什么也没还原，那棵树自然不在）。
+      # VCPKG_DOWNLOADS 同理，顺手一起建。
+      - name: 按清单安装 vcpkg 依赖（qtbase/libarchive/bit7z）
+        shell: bash
+        env:
+          VCPKG_ROOT: ${{ env.LTOOL_VCPKG }}
+          VCPKG_MAX_CONCURRENCY: "2"
+        run: |
+          set -o pipefail
+          mkdir -p build/vcpkg_installed "$VCPKG_DEFAULT_BINARY_CACHE" "$VCPKG_DOWNLOADS"
+          if ! grep -q "VCPKG_BUILD_TYPE release" "$LTOOL_VCPKG/triplets/x64-windows.cmake"; then
+            echo "set(VCPKG_BUILD_TYPE release)" >> "$LTOOL_VCPKG/triplets/x64-windows.cmake"
+          fi
+          "$LTOOL_VCPKG/vcpkg.exe" install --triplet x64-windows \
+            --x-install-root=build/vcpkg_installed --clean-after-build --no-print-usage 2>&1 | tee vcpkg-install.log
+
+      # 关键保障：依赖一旦安装完毕，立刻保存缓存！
+      # 即使后续任何步骤出错或取消，编译好的依赖已经永久存入 GitHub 缓存，下次 run 2 秒直接命中！
+      - name: 立即保存已安装的 vcpkg 依赖缓存
+        uses: actions/cache/save@v4
+        if: steps.cache-vcpkg.outputs.cache-hit != 'true'
+        with:
+          path: |
+            ${{ env.LTOOL_VCPKG }}
+            build/vcpkg_installed
+            ${{ env.VCPKG_DOWNLOADS }}
+            ${{ env.VCPKG_DEFAULT_BINARY_CACHE }}
+          key: vcpkg-${{ runner.os }}-${{ hashFiles('vcpkg.json') }}
+
+      # 生成器和这台机器保持一致：**Visual Studio 17 2022 多配置**。CMakeLists 里
+      # 插件要拷进 `${CMAKE_BINARY_DIR}/Release/ltool-plugins`、导入库挪到 `build/lib`，
+      # ltool.iss 又按 `build\Release\*` 递归收包。
+      # 因为前一步已经把 build/vcpkg_installed 准备完毕，CMake 配置在数秒内即可极速完成。
+      - name: 配置 CMake
+        shell: bash
+        env:
+          VCPKG_ROOT: ${{ env.LTOOL_VCPKG }}
+        run: |
+          set -o pipefail
+          cmake -S . -B build -G "Visual Studio 17 2022" -A x64 \
+            -DHOTARU_BUNDLE_PLUGINS="$HOTARU_PACKAGE_PLUGINS" \
+            -DVCPKG_INSTALLED_DIR="${GITHUB_WORKSPACE}/build/vcpkg_installed" \
+            -DCMAKE_TOOLCHAIN_FILE="$LTOOL_VCPKG/scripts/buildsystems/vcpkg.cmake" 2>&1 | tee configure.log
+
+      # 编 Release 速度优化：
+      # GitHub-hosted windows-2022 机器只有 2 核心 / 7GB 内存。
+      # 原先 --parallel 8 会启动 8 个 MSBuild 项目并发，每个项目内部又触发 /MP 编译，
+      # 导致 16+ 个 cl.exe 进程争抢 2 核 CPU 与 7GB 内存，造成严重 paging 页面置换与 I/O 堵塞。
+      # 优化为：--parallel 4 配合 CL_MPcount=2，限制总编译并发进程数在 4~8 个，
+      # 既跑满 CPU 超线程，又彻底避免内存溢出与磁盘颠簸；同时配合 tee 实时打印构建进度。
+      #
+      # MSBuild 那个开关**必须写 `-p:` 不能写 `/p:`**：这一步是 shell: bash，MSYS 会把
+      # `/p:CL_MPcount=2` 当 Windows 路径转掉，MSBuild 收到的就是 `p:CL_MPcount=2`，
+      # 当场报 MSB1008「只能指定一个项目」（本机 2026-10-15 实测撞过，写 /p: 这条 step 必红）。
+      - name: 编 Release
+        shell: bash
+        env:
+          VCPKG_ROOT: ${{ env.LTOOL_VCPKG }}
+          QT_QPA_PLATFORM: offscreen
+          QT_PLUGIN_PATH: ${{ github.workspace }}/build/vcpkg_installed/x64-windows/Qt6/plugins
+        run: |
+          set -o pipefail
+          cmake --build build --config Release --parallel 4 -- -v:m -p:CL_MPcount=2 2>&1 | tee build.log
+          # 借 offscreen 平台插件给自测：windeployqt 不会自动带测试专用 qoffscreen.dll，从 vcpkg 树借一颗进输出目录
+          mkdir -p build/Release/platforms
+          src=build/vcpkg_installed/x64-windows/Qt6/plugins/platforms/qoffscreen.dll
+          if [ ! -f "$src" ]; then echo "::error::$src 不在 —— vcpkg 的 qtbase 没编出 offscreen 插件"; exit 1; fi
+          cp "$src" build/Release/platforms/qoffscreen.dll
+          ls -l build/Release/platforms
+
+      - name: 无界面回归
+        shell: bash
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          cd build/Release        # VS 生成器的产物在 Release 子目录里（.iss 也按这条路径收包）
+          fail=0
+          # 构造受控多级测试目录给 --diskbranch 使用，避免扫描包含万级文件的整工作区导致 CI 超时
+          mkdir -p "$RUNNER_TEMP/test_diskbranch/sub_a" "$RUNNER_TEMP/test_diskbranch/sub_b" "$RUNNER_TEMP/test_diskbranch/sub_c"
+          head -c 10000 /dev/urandom > "$RUNNER_TEMP/test_diskbranch/sub_a/a.bin"
+          head -c 20000 /dev/urandom > "$RUNNER_TEMP/test_diskbranch/sub_b/b.bin"
+          head -c 30000 /dev/urandom > "$RUNNER_TEMP/test_diskbranch/sub_c/c.bin"
+          head -c 5000 /dev/urandom > "$RUNNER_TEMP/test_diskbranch/root.bin"
+          export LTOOL_DISKBRANCH_DIR="$RUNNER_TEMP/test_diskbranch"
+
+          # 这三面旗是**插件自己带着的判据**（grid 64 / linuxdo 44 / random 52），主程序里只有一句点名。
+          # 以前这个名单里没有它们：那就等于"只有写它的那个人本机跑过一遍"，
+          # 之后谁改了那张页都没人数 —— #94 那次（--storenet 四条红没人看见）是同一个形状。
+          # 三条都离线、都不 show 窗口，加起来约 1.2 秒；linuxdo 与 random 走沙箱数据目录，
+          # grid 那条自己算临时路径自己删（`src/main.cpp` 里 `--gridtest` 那一段写明了这一点）。
+          tests=(--smoke --about --cfgcheck --appdirs --pinyin --seamtest --diskbranch --mfttest --storeexit --storetest --pathcfg)
+          if [ "$HOTARU_PACKAGE_PLUGINS" = "ON" ]; then
+            tests+=(--plugintest --rowmenu --username --cliptest --gridtest --linuxdotest --randtest --startuptest)
+          fi
+          for f in "${tests[@]}"; do
+            echo "===== $f ====="
+            log_file="$RUNNER_TEMP/test_${f//--/}.log"
+            cmd="./Hotaru.exe $f"
+            if [ "$f" = "--diskbranch" ]; then
+              cmd="./Hotaru.exe --diskbranch $RUNNER_TEMP/test_diskbranch"
+            fi
+            # --mfttest 要真扫一整盘（MFT 一遍）+ 一个子树（遍历一遍），60 秒的默认预算在
+            # VM 的盘上会被吃穿（run 39026813012 就是 exit 124：判据没错，是超时）。
+            # --smoke 也一样：卷路径那个 bug（\\.\C:\ 多一个反斜杠 → 路径不存在）修好之后，
+            # 深索引的"MFT 优先"第一次真跑起来了 —— 在这台 VM 上光枚举 167 万条就要 25~45 秒。
+            to=60s
+            if [ "$f" = "--mfttest" ] || [ "$f" = "--smoke" ]; then
+              to=240s
+            fi
+            if timeout $to $cmd > "$log_file" 2>&1; then
+              rc=0
+            else
+              rc=$?
+            fi
+            cat "$log_file"
+            if [ $rc -ne 0 ]; then
+              echo "::error::$f 退出码非 0 (exit code: $rc)"
+              fail=1
+              continue
+            fi
+            # 空输出必须算失败：这台机器上 --smoke 就以"0 字节 + 退出码 0"的形状哑过很久
+            # （命令行被单实例守卫转交给已常驻的实例），有输出才证明它真跑了。
+            if [ ! -s "$log_file" ]; then
+              echo "::error::$f 一行都没输出（这就是假绿的形状）"
+              fail=1
+              continue
+            fi
+            if grep -q "失败" "$log_file"; then
+              if grep -E "失败 [1-9][0-9]* 项" "$log_file"; then
+                echo "::error::$f 报了失败"
+                fail=1
+              fi
+            fi
+          done
+          echo "===== --archivetest（造一个包再解回来）====="
+          mkdir -p "$RUNNER_TEMP/ciart/src"
+          head -c 200000 /dev/urandom > "$RUNNER_TEMP/ciart/src/b.bin"
+          ./Hotaru.exe --archivetest make "$RUNNER_TEMP/ciart/src" "$RUNNER_TEMP/ciart/t.7z" 7z 5
+          ./Hotaru.exe --archivetest extract "$RUNNER_TEMP/ciart/t.7z" "$RUNNER_TEMP/ciart/out"
+          echo "INFO 跳过的：--capgeo --capflash --recq --rectest --recordui（要真屏幕）· --searchtime（整盘扫描太慢）"
+          echo "INFO --mfttest 在这跑：runner 是提权的，MFT 直读那两条对账判据能真跑（换到非提权环境它会点名 SKIP，不算绿也不算红）"
+          exit $fail
+
+      - name: 装 Inno Setup
+        shell: powershell
+        run: choco install innosetup --no-progress -y
+
+      - name: 找 ISCC
+        shell: bash
+        run: |
+          for candidate in "/c/Program Files (x86)/Inno Setup 6/ISCC.exe" \
+                           "/c/Program Files (x64)/Inno Setup 6/ISCC.exe" \
+                           "/c/Program Files/Inno Setup 6/ISCC.exe"; do
+            if [ -f "$candidate" ]; then
+              echo "ISCC=$(cygpath -w "$candidate")" >> "$GITHUB_ENV"
+              inno_dir=$(dirname "$candidate")
+              # Inno Setup 默认不带简体中文语言包，将仓库自带的语言包补进 Inno Setup 的 Languages 目录
+              if [ -f resources/ChineseSimplified.isl ]; then
+                cp resources/ChineseSimplified.isl "$inno_dir/Languages/"
+                echo "INFO: 已将 resources/ChineseSimplified.isl 安装至 Inno Setup Languages 目录"
+              fi
+              exit 0
+            fi
+          done
+          echo "::error::Inno Setup 装完了，可 ISCC.exe 哪个默认路径都不在"
+          exit 1
+
+      - name: 标签必须和安装包里的版本号对上
+        shell: bash
+        run: |
+          if [ "${GITHUB_REF_TYPE}" != "tag" ]; then echo "INFO 不是标签推的，不比这条（版本号 $(grep -oE 'MyAppVersion \"[^\"]+\"' ltool.iss)）"; exit 0; fi
+          want="${GITHUB_REF_NAME#v}"
+          have="$(grep -oE '#define +MyAppVersion +"[^"]+"' ltool.iss | sed -E 's/.*"([^"]+)".*/\1/')"
+          if [ "$want" != "$have" ]; then
+            echo "::error::标签是 v$want，而 ltool.iss 里 MyAppVersion 是 $have"
+            exit 1
+          fi
+
+      - name: 打安装包
+        shell: bash
+        run: |
+          set +e
+          # -DFINAL：发出去的包要最小体积。本机实测同一棵树 normal 22.51MiB/6.8 秒、
+          # FINAL 21.79MiB/10.3 秒 —— 省 0.72MB 多花 3.5 秒；本机的 deliver.ps1 不带它，
+          # 因为每轮闭环少 3.5 秒是天天摸得到的，发版这条线没这个约束。
+          #
+          # 开关一律用短横不用斜杠：这一步是 bash，MSYS 会把 `/DFINAL` 当路径转换掉，
+          # ISCC 于是报 "You may not specify more than one script filename"（本机实测撞过）。
+          "$ISCC" -DFINAL ltool.iss > iscc.log 2>&1
+          status=$?
+          tail -n 30 iscc.log
+          ls -l installer
+          exit $status
+
+      # 插件 SDK：插件仓库（mateo-ki/ltool_plugin）独立编 dll 要的那一份 —— core 公开的头 +
+      # ltoolcore.lib（导入库）+ cmake/ltool-plugin.cmake。头清单不是手抄的：
+      # tools/make_sdk.py 从 plugins/ 里真实 include 的那些求**传递闭包**，多一个少一个跟着源码走。
+      - name: 打插件 SDK
+        if: env.HOTARU_PACKAGE_PLUGINS == 'ON'
+        shell: bash
+        run: |
+          set -e
+          python tools/make_sdk.py sdk-out --zip
+          # 导入库是编 core 时才产出的（build/lib，被特意挪出 Release 树免得进安装包）：
+          # 少了它这份 SDK 就是废的，所以这里硬验
+          test -f sdk-out/lib/ltoolcore.lib || { echo "::error::sdk 里没有 ltoolcore.lib"; exit 1; }
+          ls -l installer/ltool-sdk-*.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Hotaru-windows-installer
+          path: |
+            installer/Hotaru-*-setup.exe
+          if-no-files-found: error
+
+      # 仅显式额外打包时生成本次插件清单，哈希取自同次构建的产物。
+      # 编译和 ABI 检查不等于功能适配验收；运行时默认仍保留上游源。
+      - name: 打插件商店清单（每一颗 dll + index，和 core 同一次构建）
+        if: env.HOTARU_PACKAGE_PLUGINS == 'ON'
+        shell: bash
+        env:
+          PYTHONUTF8: "1"
+          PYTHONIOENCODING: "utf-8"
+        run: |
+          set -e
+          n=$(ls build/Release/ltool-plugins/ltool-*.dll 2>/dev/null | wc -l)
+          # 编出来的颗数对不上 plugins/ 目录数 = 有目标没构建（CMakeLists 那条 add_dependencies
+          # 是数从名单算的，写死过的两次都腐烂了），这种清单发出去就是"商店里少几颗"。
+          want=$(ls -d plugins/*/ | wc -l)
+          if [ "$n" != "$want" ]; then echo "::error::产物 $n 颗 ≠ plugins/ 目录 $want 个"; exit 1; fi
+          python tools/make_plugin_index.py --build build/Release/ltool-plugins \
+            --out installer/plugins-index.json
+          # 发出去之前自己先读一遍：商店那边用的就是这份解析，字段少了它会画出一片空卡。
+          # 条数不写死 19 —— 从 plugins/ 的目录数算，加一颗插件不用回来改 CI。
+          python - <<'PY'
+          import glob, json, os
+          want = len(glob.glob('plugins/*/plugin.json'))
+          d = json.load(open('installer/plugins-index.json', encoding='utf-8'))
+          assert d['schema'] == 1, 'schema 不是 1'
+          assert len(d['plugins']) == want, '清单里 %d 条，plugins/ 目录有 %d 个' % (len(d['plugins']), want)
+          for p in d['plugins']:
+              for k in ('id', 'name', 'desc', 'api', 'version', 'file', 'bytes', 'sha256', 'url'):
+                  assert p.get(k) not in (None, ''), '%s 缺 %s' % (p['id'], k)
+              # 商店那边 parseIndex 第一条就是"不是 https 就整条拒收"，
+              # 而只断言 endswith('/'+file) 的话连 "/ltool-ads.dll" 这种相对路径都能过
+              # —— 本机实测就这么漏过一次（base 算出来没接进 row），所以这里量前缀也量。
+              assert p['url'].startswith('https://github.com/'), '%s 的 url 不是绝对 https 直链：%s' % (p['id'], p['url'])
+              assert '/releases/download/v' in p['url'], '%s 的 url 不在发版资产那一档：%s' % (p['id'], p['url'])
+              assert p['url'].endswith('/' + p['file']), '%s 的 url 和文件名对不上' % p['id']
+          print('清单自洽：%d 条，接口 API %s，core=%s'
+                % (len(d['plugins']), d['plugins'][0]['api'], d['core']))
+          PY
+
+      # 两道 ABI 闸在**要发出去的这批产物**上再跑一遍：这一步红 = 这次发版本身有问题，
+      # 不许把对不上 core 的 dll 挂上 Release（名字齐但布局陈了也一样拦）。
+      - name: 发版前两道 ABI 闸
+        if: env.HOTARU_PACKAGE_PLUGINS == 'ON'
+        shell: bash
+        env:
+          PYTHONUTF8: "1"
+          PYTHONIOENCODING: "utf-8"
+        run: |
+          set -e
+          python tools/abi_check.py build/Release/ltoolcore.dll build/Release/ltool-plugins | tail -3
+          test "${PIPESTATUS[0]}" = "0"
+          python tools/abi_stale.py build/Release/ltool-plugins | tail -3
+          test "${PIPESTATUS[0]}" = "0"
+
+      # 额外产物独立保存，默认主程序安装器永远不含这些插件。
+      - uses: actions/upload-artifact@v4
+        if: env.HOTARU_PACKAGE_PLUGINS == 'ON'
+        with:
+          name: Hotaru-windows-plugins-extra
+          path: |
+            installer/ltool-sdk-*.zip
+            installer/plugins-index.json
+            build/Release/ltool-plugins/ltool-*.dll
+          if-no-files-found: error
+
+      - name: 发 GitHub Release（只有标签推的 run 才发）
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PYTHONUTF8: "1"
+          PYTHONIOENCODING: "utf-8"
+        run: |
+          set -e
+          extra=""
+          case "$GITHUB_REF_NAME" in
+            *-*) extra="--prerelease"; echo "INFO 标签带预发后缀，Release 标成 pre-release（/releases/latest 不会回它）" ;;
+          esac
+          # 发布说明**自己生成**，不用 `--generate-notes`：GitHub 那份拼出来的是裸提交标题列表，
+          # 而这个仓库的提交信息本来就写着原因和实测数字（一笔动辄几十行），全被它丢了。
+          # 形状照 mateo-ki/vpn-parser 那种：概述 → 一笔提交一节 → 资产表（含 sha256）→ Full Changelog。
+          # 顺带产出 installer/sha256.txt（说明里承诺了"下 sha256.txt 对整批"，那它必须真存在）。
+          plugin_args=()
+          plugin_assets=()
+          required_assets=(sha256.txt)
+          if [ "$HOTARU_PACKAGE_PLUGINS" = "ON" ]; then
+            plugin_args+=(--include-plugins)
+            plugin_assets+=(installer/ltool-sdk-*.zip installer/plugins-index.json build/Release/ltool-plugins/ltool-*.dll)
+            required_assets+=(plugins-index.json)
+          fi
+          # 主题先作为独立附件上传到同标签草稿；发布时验证并纳入校验表。
+          theme_args=()
+          theme_assets=()
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            mapfile -t theme_names < <(gh release view "$GITHUB_REF_NAME" --json assets -q '.assets[].name' | grep -E '^Hotaru-theme-[A-Za-z0-9._-]+\.zip$' || true)
+            for theme in "${theme_names[@]}"; do
+              gh release download "$GITHUB_REF_NAME" --pattern "$theme" --dir installer/themes
+              theme_args+=(--theme-file "installer/themes/$theme")
+              theme_assets+=("installer/themes/$theme")
+            done
+          fi
+          python tools/make_release_notes.py "$GITHUB_REF_NAME" release-notes.md "${plugin_args[@]}" "${theme_args[@]}"
+          test -s release-notes.md
+          # 量的就是**将要发出去的那份文件**本身（上面那一栏量的是判断，这一行量的是产物）
+          python tools/notes_history_leak_check.py --file release-notes.md
+          echo "---- 说明开头 12 行 ----"; head -12 release-notes.md
+          # 默认只发布安装器和校验表；插件资产必须显式选择额外打包。
+          assets=(installer/Hotaru-*-setup.exe installer/sha256.txt "${plugin_assets[@]}" "${theme_assets[@]}")
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" "${assets[@]}" --clobber
+            gh release edit "$GITHUB_REF_NAME" --title "Hotaru $GITHUB_REF_NAME" --notes-file release-notes.md --draft=false $extra
+          else
+            gh release create "$GITHUB_REF_NAME" "${assets[@]}" \
+              --verify-tag --title "Hotaru $GITHUB_REF_NAME" --notes-file release-notes.md $extra
+          fi
+          got=$(gh release view "$GITHUB_REF_NAME" --json assets -q '.assets | length')
+          echo "INFO 这次 Release 的资产 $got 个（默认无插件，主题独立附件，额外插件由显式开关控制）"
+          # 说明里那张表点名的文件必须真的都在资产里 —— 写"看 sha256.txt"而资产里没有，就是假话。
+          names=$(gh release view "$GITHUB_REF_NAME" --json assets -q '.assets[].name' | tr '\n' ' ')
+          for n in "${required_assets[@]}"; do
+            case " $names " in *" $n "*) ;; *) echo "::error::说明里点名了 $n，可它不在资产里"; exit 1 ;; esac
+          done
+
+      - name: 失败时把各段日志留成 artifact
+        if: failure()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-logs
+          path: |
+            vcpkg-install.log
+            configure.log
+            build.log
+            iscc.log
