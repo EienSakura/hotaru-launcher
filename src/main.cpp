@@ -3538,6 +3538,21 @@ int main(int argc, char* argv[])
                 settle();
                 return qMakePair(hasSection(QStringLiteral("工具")), rows());
             };
+            // 默认构建不捆绑 DLL 插件。插件相关的搜索路由只有在对应插件实际存在时
+            // 才有可验证对象；无插件构建要明确报告 SKIP，不能把打包策略误报成搜索回归。
+            const auto pluginReady = [](const QString& id) {
+                const PluginHost::Meta* m = PluginHost::meta(id);
+                return m && m->ok() && !PluginHost::isDisabled(id) && QFileInfo::exists(m->file);
+            };
+            const auto checkPlugin = [&](const char* name, const QString& id,
+                                         const QString& got, const QString& want) {
+                if (!pluginReady(id)) {
+                    std::printf("SKIP %s：插件 %s 未随本次构建提供\n", name,
+                                id.toUtf8().constData());
+                    return;
+                }
+                check(name, got, want);
+            };
             const auto t0 = query(QStringLiteral("zzqqxxww"));   // 乱码：什么都不该出
             const auto t1 = query(QStringLiteral("cipanqingli"));  // 磁盘清理的全拼
             const auto t2 = query(QStringLiteral("cpql"));         // 它的首字母
@@ -3545,8 +3560,10 @@ int main(int argc, char* argv[])
                         t0.first ? 1 : 0, int(t0.second), t1.first ? 1 : 0, int(t1.second),
                         t2.first ? 1 : 0, int(t2.second));
             check("乱码查询不出工具", t0.first ? "yes" : "no", "no");
-            check("全拼 cipanqingli 直达工具", t1.first ? "yes" : "no", "yes");
-            check("首字母 cpql 也直达工具", t2.first ? "yes" : "no", "yes");
+            checkPlugin("全拼 cipanqingli 直达工具", QStringLiteral("disk"),
+                        t1.first ? "yes" : "no", "yes");
+            checkPlugin("首字母 cpql 也直达工具", QStringLiteral("disk"),
+                        t2.first ? "yes" : "no", "yes");
             // 他实际报的那一个：任务管理器不在卡片墙那六件事里，走的是「应用」那一节
             // （SysTools::systemTools() 并进应用索引），所以这条要断言的是应用节。
             input->setText(QStringLiteral("renwu"));
@@ -3561,13 +3578,16 @@ int main(int argc, char* argv[])
             // 取整之后直达不能变哑：qingli 不是「磁盘清理」这个名字的开头，
             // 但它是关键词「清理」的开头 —— 这条守的是"别把直达搞成搜不到"。
             const auto t4 = query(QStringLiteral("qingli"));
-            check("取整不伤直达：qingli 还是直达磁盘清理", t4.first ? "yes" : "no", "yes");
+            checkPlugin("取整不伤直达：qingli 还是直达磁盘清理", QStringLiteral("disk"),
+                        t4.first ? "yes" : "no", "yes");
             // 新插件「图片排版」进的是同一张表（PluginHost::scan()），搜索框这边不该要特判。
             // 这两条盯的就是"进商店列表 = 也进搜索"这条自动接上的链有没有断。
             const auto t5 = query(QStringLiteral("paiban"));
-            check("全拼 paiban 直达「图片排版」（关键词「排版」开头）", t5.first ? "yes" : "no", "yes");
+            checkPlugin("全拼 paiban 直达「图片排版」（关键词「排版」开头）", QStringLiteral("grid"),
+                        t5.first ? "yes" : "no", "yes");
             const auto t6 = query(QStringLiteral("gongge"));
-            check("全拼 gongge 直达「图片排版」（关键词「宫格」开头）", t6.first ? "yes" : "no", "yes");
+            checkPlugin("全拼 gongge 直达「图片排版」（关键词「宫格」开头）", QStringLiteral("grid"),
+                        t6.first ? "yes" : "no", "yes");
             // 电源那两条（2026-10-19 他点名：输 sleep/休眠 就休眠，输 shutdown/关机 就关机）。
             // **这里只量路由**：第一行是不是那颗、target 对不对 —— 一次都不真按回车，
             // 否则跑判据的这台机器当场就睡过去了。
@@ -3796,8 +3816,8 @@ int main(int argc, char* argv[])
                             sections().toUtf8().constData(),
                             w.resultCount() > 0 ? w.resultAt(0).title.toUtf8().constData() : "");
                 std::fflush(stdout);
-                check("直达改完还是排第一（回车那条仍然是工具，不是应用）",
-                      headIsTool() ? "yes" : "no", "yes");
+                checkPlugin("直达改完还是排第一（回车那条仍然是工具，不是应用）",
+                            QStringLiteral("disk"), headIsTool() ? "yes" : "no", "yes");
                 // 这条是"老代码在这里 return"的直接探针：兜底那行是函数最后才加的，
                 // 只要有人把独占加回来，它立刻消失 —— 不依赖任何一台机器装了什么。
                 bool netFallback = false;
@@ -3827,9 +3847,10 @@ int main(int argc, char* argv[])
                 std::printf("INFO 端到端 disk：小节=[%s] 第一行是工具=%d 应用节=%d\n",
                             sections().toUtf8().constData(), diskToolHead ? 1 : 0, diskAppSect ? 1 : 0);
                 std::fflush(stdout);
-                check("disk 这种撞名：工具还在第一行（回车那条）", diskToolHead ? "yes" : "no", "yes");
-                check("disk 这种撞名：应用那一节不再被铲平（老行为 = Disk Cleanup 整个搜不出来）",
-                      diskAppSect ? "yes" : "no", "yes");
+                checkPlugin("disk 这种撞名：工具还在第一行（回车那条）", QStringLiteral("disk"),
+                            diskToolHead ? "yes" : "no", "yes");
+                checkPlugin("disk 这种撞名：应用那一节不再被铲平（老行为 = Disk Cleanup 整个搜不出来）",
+                            QStringLiteral("disk"), diskAppSect ? "yes" : "no", "yes");
             }
             // ---- 打包应用那一族（shell:AppsFolder，2026-10-20 加的第四个索引来源）----
             // 他报的原始形状是"开始菜单搜得到 ChatGPT，ltool 搜索框搜不到"：那台机器开始菜单
@@ -6568,15 +6589,29 @@ int main(int argc, char* argv[])
             };
             const auto where = [&stack, &backBtn] {
                 QWidget* cur = stack ? stack->currentWidget() : nullptr;
+                // 首页由 QWidget 包装 QScrollArea，以承载分页和空状态；判据报告实际可见区域。
+                QWidget* shown = cur;
+                if (stack && stack->currentIndex() == 0 && cur) {
+                    if (auto* area = cur->findChild<QScrollArea*>())
+                        shown = area;
+                }
                 return QStringLiteral("index=%1 类=%2 返回可见=%3")
                     .arg(stack ? stack->currentIndex() : -9)
-                    .arg(cur ? QString::fromLatin1(cur->metaObject()->className())
+                    .arg(shown ? QString::fromLatin1(shown->metaObject()->className())
                              : QStringLiteral("无"))
                     .arg(backBtn() && backBtn()->isVisible() ? 1 : 0);
             };
             eq("起点：那一面卡片墙在前，返回那颗藏着", where(),
                "index=0 类=QScrollArea 返回可见=0");
 
+            const PluginHost::Meta* registryMeta = PluginHost::meta(QStringLiteral("registry"));
+            if (!registryMeta || !registryMeta->ok() || !QFileInfo::exists(registryMeta->file)) {
+                std::printf("SKIP storeexit：本次构建未提供 registry 插件，跳过依赖插件卡片的出口回归\n");
+                std::printf("storeexit: 失败 0 项（无插件构建）\n");
+                std::fflush(stdout);
+                app.quit();
+                return;
+            }
             QPointer<QFrame> card = cardNamed(QStringLiteral("注册表分析"));
             check("那张「注册表分析」的卡画出来了", card != nullptr,
                   card ? QStringLiteral("yes") : QStringLiteral("no"));

@@ -63,7 +63,7 @@ jobs:
       # fetch-depth: 0 + fetch-tags 是给下面那道插件版本闸的：它拿最近一个 tag 当基线比源码改动，
       # 默认那次浅克隆（depth 1，不带 tag）里 git describe 直接失败 —— 脚本会报 GATE_BASELINE=none 并红，
       # 而不是假装绿。整个仓库 97 个提交，全量 checkout 实测多花不到十秒。
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0
           fetch-tags: true
@@ -131,11 +131,11 @@ jobs:
         run: python tools/core_abi_gate.py
 
       # 关键优化：把 build/vcpkg_installed 加入缓存！
-      # 使用 actions/cache/restore@v4 恢复，安装完依赖后立即用 cache/save 保存，
+      # 使用 actions/cache/restore@v5 恢复，安装完依赖后立即用 cache/save 保存，
       # 避免后续步骤哪怕遇到网络/取消等意外时导致几十分钟编译的依赖被全部丢弃。
       - name: 恢复 vcpkg 依赖缓存
         id: cache-vcpkg
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v5
         with:
           path: |
             ${{ env.LTOOL_VCPKG }}
@@ -197,7 +197,7 @@ jobs:
       # 关键保障：依赖一旦安装完毕，立刻保存缓存！
       # 即使后续任何步骤出错或取消，编译好的依赖已经永久存入 GitHub 缓存，下次 run 2 秒直接命中！
       - name: 立即保存已安装的 vcpkg 依赖缓存
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v5
         if: steps.cache-vcpkg.outputs.cache-hit != 'true'
         with:
           path: |
@@ -386,7 +386,7 @@ jobs:
           test -f sdk-out/lib/ltoolcore.lib || { echo "::error::sdk 里没有 ltoolcore.lib"; exit 1; }
           ls -l installer/ltool-sdk-*.zip
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: Hotaru-windows-installer
           path: |
@@ -447,7 +447,7 @@ jobs:
           test "${PIPESTATUS[0]}" = "0"
 
       # 额外产物独立保存，默认主程序安装器永远不含这些插件。
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         if: env.HOTARU_PACKAGE_PLUGINS == 'ON'
         with:
           name: Hotaru-windows-plugins-extra
@@ -518,7 +518,7 @@ jobs:
       - name: 失败时把各段日志留成 artifact
         if: failure()
         continue-on-error: true
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: ci-logs
           path: |
