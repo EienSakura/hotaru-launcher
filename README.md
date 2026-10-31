@@ -4,7 +4,7 @@
 
 [使用指南](docs/usage.md) · [功能变更](docs/changes.md) · [开发说明](docs/development.md)
 
-**当前版本：1.0.0** · [项目仓库](https://github.com/EienSakura/Hotaru) · [版本发布](https://github.com/EienSakura/Hotaru/releases)
+**当前版本：1.0.1** · [项目仓库](https://github.com/EienSakura/hotaru-launcher) · [版本发布](https://github.com/EienSakura/hotaru-launcher/releases)
 
 ## 界面预览
 
@@ -46,7 +46,7 @@ Hotaru 延续 ltool 的全局热键、应用与文件搜索、拼音匹配、网
 
 主题采用**本仓库 Release 独立 ZIP 附件**的分发方式，与程序分开下载、安装和更新，不额外建立主题仓库，也不打入主程序安装包。下载后在“配置 → 外观 → 导入主题包”中安装。
 
-现在已有主题包会在1.0.0的release中加入。制作自己的主题请参阅[主题包设计规范](docs/theme-package.md)。
+主题包通过对应 Release 的独立附件提供；制作自己的主题请参阅[主题包设计规范](docs/theme-package.md)。
 
 ## 快速开始
 

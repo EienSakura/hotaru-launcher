@@ -1,7 +1,7 @@
 name: Build and Release
 
 # 推 v* 标签 → 编 Release、跑无界面回归、打安装包、发一个 GitHub Release；
-# 推 hotaru/dev、hotaru/main 或手动跑 → 只做前三件事，不发布（所以这条工作流可以随时验包，不必先承诺发版）。
+# 推 hotaru/dev、main 或手动跑 → 只做前三件事，不发布（所以这条工作流可以随时验包，不必先承诺发版）。
 #
 # 预发/稳定就靠标签本身分：v0.8.1-beta.1 建的 Release 自动标 pre-release，
 # v0.8.1 建的是稳定版。界面「检查更新」打的是 /releases/latest，GitHub 实测会跳过
@@ -19,7 +19,7 @@ on:
       - "v*"
     branches:
       - hotaru/dev
-      - hotaru/main
+      - main
   workflow_dispatch:
     inputs:
       package_plugins:

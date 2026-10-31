@@ -11,7 +11,7 @@
 
 namespace {
 
-QString websFile() { return Utils::dataDir() + "/webs.json"; }
+QString websFile() { return Utils::dataDir() + "/quick-search.json"; }
 
 QVector<WebEntry> defaults()
 {
@@ -20,12 +20,14 @@ QVector<WebEntry> defaults()
     ld.keys = { "ld", "linuxdo" };
     ld.name = "LINUX DO";
     ld.url = "https://linux.do";
+    ld.targetType = "web"; ld.target = ld.url;
     v.append(ld);
     WebEntry gh;
     gh.keys = { "gh", "github" };
     gh.name = "GitHub";
     gh.url = "https://github.com";
-    gh.searchUrl = "https://github.com/search?q=%s";
+    gh.searchUrl.clear();
+    gh.targetType = "web"; gh.target = gh.url;
     v.append(gh);
     return v;
 }
@@ -42,7 +44,9 @@ QJsonArray websJsonArray(const QVector<WebEntry>& webs)
             keys.append(k.toLower());
         o.insert("keys", keys);
         o.insert("name", e.name);
-        o.insert("url", e.url);
+        o.insert("targetType", e.targetType.isEmpty() ? QStringLiteral("web") : e.targetType);
+        o.insert("target", e.target.isEmpty() ? e.url : e.target);
+        if (!e.url.isEmpty()) o.insert("url", e.url);
         if (!e.searchUrl.isEmpty())
             o.insert("searchUrl", e.searchUrl);
         arr.append(o);
@@ -86,9 +90,14 @@ QVector<WebEntry> loadWebs()
         for (const QJsonValue& k : o.value("keys").toArray())
             e.keys << k.toString().toLower();   // 比对用的是小写首词，存的时候就先归好
         e.name = o.value("name").toString();
+        e.targetType = o.value("targetType").toString().trimmed().toLower();
+        if (e.targetType.isEmpty()) e.targetType = QStringLiteral("web");
+        e.target = o.value("target").toString().trimmed();
         e.url = o.value("url").toString();
+        if (e.target.isEmpty()) e.target = e.url;
+        if (e.url.isEmpty() && e.targetType == QLatin1String("web")) e.url = e.target;
         e.searchUrl = o.value("searchUrl").toString();
-        if (e.name.isEmpty() || e.url.isEmpty())
+        if (e.name.isEmpty() || e.target.isEmpty())
             continue;
         out.append(e);
     }

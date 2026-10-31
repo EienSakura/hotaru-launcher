@@ -11,6 +11,7 @@
 #include "platform/FileMeta.h"
 #include <QApplication>
 #include <QScreen>
+#include <QDialog>
 #include <QInputDialog>
 #include <QAbstractButton>
 #include <QCryptographicHash>
@@ -395,6 +396,26 @@ int runHotaruSelftest(QApplication& app, bool preview, const QString& localPacka
         auto missing=layout.pinnedApps[1];QFile::remove(missing.targetPath);
         check("失效目标仍能单独重命名",PinnedApps::rename(missing.id,"失效别名",&error));
         PinnedApps::saveConfig(layout);window.refreshLauncher();grid->setPage(0);spin();
+        const auto beforeCreateCancel=bytes(PinnedApps::configPath());
+        const int groupsBeforeCreateCancel=PinnedApps::config().groups.size();
+        QTimer cancelCreateGroup;
+        cancelCreateGroup.setInterval(10);
+        QObject::connect(&cancelCreateGroup,&QTimer::timeout,&window,[&] {
+            for (auto* widget:QApplication::topLevelWidgets()) {
+                auto* dialog=qobject_cast<QDialog*>(widget);
+                if (!dialog || dialog->objectName()!=QStringLiteral("renameDialog") || !dialog->isVisible())
+                    continue;
+                for (auto* button:dialog->findChildren<QPushButton*>())
+                    if (button->text()==QStringLiteral("取消")) {button->click();return;}
+            }
+        });
+        const QPoint cancelCell=PinnedApps::firstFreeCell(PinnedApps::config());
+        cancelCreateGroup.start();
+        emit grid->createGroupRequested(cancelCell.y(),cancelCell.x());
+        cancelCreateGroup.stop();
+        check("取消新建面板文件夹不写入配置",
+              bytes(PinnedApps::configPath())==beforeCreateCancel
+                  && PinnedApps::config().groups.size()==groupsBeforeCreateCancel);
         const QPoint source=grid->cellRect(0,0).center(),target=grid->cellRect(0,1).center();
         mouse(*grid,QEvent::MouseButtonPress,source,Qt::LeftButton,Qt::LeftButton);
         mouse(*grid,QEvent::MouseMove,target,Qt::NoButton,Qt::LeftButton);spin(180);
@@ -425,7 +446,18 @@ int runHotaruSelftest(QApplication& app, bool preview, const QString& localPacka
                 children->setPage(1);check("二级页分页不显示其他页图标",children->itemIds().size()==1);
                 children->setPage(0);QKeyEvent right(QEvent::KeyPress,Qt::Key_Right,Qt::NoModifier);QApplication::sendEvent(children,&right);
                 QTimer::singleShot(30,&window,[] {
-                    for (auto* widget:QApplication::topLevelWidgets()) if (auto* dialog=qobject_cast<QInputDialog*>(widget)) {dialog->setTextValue(QStringLiteral("组内新别名"));dialog->accept();}
+                    for (auto* widget:QApplication::topLevelWidgets()) {
+                        if (auto* dialog=qobject_cast<QInputDialog*>(widget)) {
+                            dialog->setTextValue(QStringLiteral("组内新别名"));
+                            dialog->accept();
+                        } else if (auto* renameDialog=qobject_cast<QDialog*>(widget);
+                                   renameDialog && renameDialog->objectName()==QStringLiteral("renameDialog")) {
+                            if (auto* edit=renameDialog->findChild<QLineEdit*>(QStringLiteral("renameEdit")))
+                                edit->setText(QStringLiteral("组内新别名"));
+                            for (auto* button:renameDialog->findChildren<QPushButton*>())
+                                if (button->text()==QStringLiteral("确定")) {button->click();break;}
+                        }
+                    }
                 });
                 QKeyEvent f2(QEvent::KeyPress,Qt::Key_F2,Qt::NoModifier);QApplication::sendEvent(children,&f2);
                 check("F2修改组内显示名不改源文件",PinnedApps::load()[0].title==QStringLiteral("组内新别名") && bytes(original.targetPath)==sourceBytes);
@@ -674,6 +706,18 @@ int runHotaruSelftest(QApplication& app, bool preview, const QString& localPacka
     check("新增使用第一个空格",PinnedApps::add(folderApp,-1,-1,&error) && PinnedApps::load().back().gridRow==0 && PinnedApps::load().back().gridColumn==0);
     check("相同启动信息禁止重复固定",PinnedApps::isPinned(folderApp) && !PinnedApps::add(folderApp,-1,-1,&error));
     auto cleanup= PinnedApps::config();cleanup.pinnedApps.removeLast();PinnedApps::saveConfig(cleanup);
+    {
+        const auto beforePanelGroup = PinnedApps::config();
+        const QPoint groupCell = PinnedApps::firstFreeCell(beforePanelGroup);
+        check("新建面板文件夹只写入分组配置",
+              PinnedApps::createGroup(QStringLiteral("测试面板文件夹"), groupCell.y(), groupCell.x(), &error));
+        const auto afterPanelGroup = PinnedApps::config();
+        check("面板文件夹不产生磁盘目标固定项",
+              afterPanelGroup.groups.size()==beforePanelGroup.groups.size()+1
+              && afterPanelGroup.pinnedApps.size()==beforePanelGroup.pinnedApps.size()
+              && afterPanelGroup.groups.back().title==QStringLiteral("测试面板文件夹"));
+        PinnedApps::saveConfig(beforePanelGroup);
+    }
     QFile legacyFile(PinnedApps::configPath());check("旧配置夹具可读取",legacyFile.open(QIODevice::ReadOnly));
     auto legacy=QJsonDocument::fromJson(legacyFile.readAll()).object();legacyFile.close();
     auto legacyItems=legacy.value("pinnedApps").toArray();

@@ -4,7 +4,7 @@
 
 ## 技术栈与模块
 
-当前开发目标为 Windows x64，使用 C++20、Qt 6.10.2、CMake 3.24及以上版本和Visual Studio 2022。Qt、libarchive和bit7z通过 `vcpkg.json` 清单管理；版本信息从 `ltool.iss` 读取，Hotaru 首版为 `1.0.0`。
+当前开发目标为 Windows x64，使用 C++20、Qt 6.10.2、CMake 3.24及以上版本和Visual Studio 2022。Qt、libarchive和bit7z通过 `vcpkg.json` 清单管理；版本信息从 `ltool.iss` 读取，当前发布版本为 `1.0.1`。
 
 | 模块 | 职责 |
 | --- | --- |
@@ -140,8 +140,8 @@ git diff --check
 
 ## 分支与发布现状
 
-- `main`用于跟踪上游；Hotaru日常开发使用 `hotaru/dev`，长期分支为 `hotaru/main`。
-- 保留 `upstream` 指向 [mateo-ki/ltool](https://github.com/mateo-ki/ltool)，用于后续取回和合并更新；本项目仓库为 [EienSakura/Hotaru](https://github.com/EienSakura/Hotaru)，远端配置与推送另行授权。
+- `main` 是本项目稳定发布分支和 GitHub 默认分支，日常开发使用 `hotaru/dev`；稳定版本通过 squash 合并到 `main`。
+- 保留 `upstream` 指向 [mateo-ki/ltool](https://github.com/mateo-ki/ltool)，用于后续取回和合并更新；本项目仓库为 [EienSakura/hotaru-launcher](https://github.com/EienSakura/hotaru-launcher)。
 - 默认插件清单保留上游源并注明尚未验证适配；关于页只展示 Hotaru 信息并链接本项目仓库与发布页，在线升级隐藏并禁用。
 - Inno Setup应用名、执行文件名、安装包名和安装标识已与上游分离，CI执行文件及安装包路径同步改为Hotaru；安装器未实际安装，云端CI和独立发布尚未验收。
 - 旧 `build/verify/` 交付脚本只保留在维护者本地，不随源码分发；开发测试直接运行项目内构建产物。
@@ -158,7 +158,7 @@ git diff --check
 
 ## 自动发布
 
-个人仓库使用 `origin`，上游仓库保留为 `upstream`。日常代码推送到 `hotaru/dev`，稳定代码通过 squash 合并到 `hotaru/main`，每个合并节点只保留一笔汇总提交；默认分支使用 `hotaru/main`，不推送上游 `main` 或继承的版本标签。
+个人仓库使用 `origin`，上游仓库保留为 `upstream`。日常代码推送到 `hotaru/dev`，稳定代码通过 squash 合并到 `main`，每个合并节点只保留一笔汇总提交；`main` 是 GitHub 默认分支，不推送上游 `main` 或继承的版本标签。
 
 推送与 `ltool.iss` 版本一致的 `v*` 标签会触发 GitHub Actions：执行静态门禁、构建、离屏回归、生成安装器与校验表，通过后发布 GitHub Release。分支推送只构建，不发布。首版的历史比较使用 `tools/upstream-base.txt` 中的分叉提交，避免依赖个人远端未发布的上游标签。vcpkg 使用文件二进制缓存，由 `actions/cache` 保存目录，不使用已经移除的 `x-gha` 接口。
 
@@ -168,6 +168,6 @@ git diff --check
 
 ### 独立历史与上游同步
 
-`hotaru/main` 和 `hotaru/dev` 从 Hotaru 1.0.0 的独立首提交开始，不继承上游提交历史。许可证、版权及 README 来源说明继续保留。`upstream` 仍指向原项目；维护者在本地保存完整历史与同步记录，先在本地同步分支验证上游更新，再将审核后的代码差异应用到 `hotaru/dev`，不能把带上游父历史的合并提交推回产品分支。
+`main` 和 `hotaru/dev` 从 Hotaru 1.0.0 的独立首提交开始，不继承上游提交历史。许可证、版权及 README 来源说明继续保留。`upstream` 仍指向原项目；维护者在本地保存完整历史与同步记录，先在本地同步分支验证上游更新，再将审核后的代码差异应用到 `hotaru/dev`，不能把带上游父历史的合并提交推回产品分支。
 
 CI 从 `tools/upstream-base.txt` 下载固定上游提交，仅用于插件版本及接口布局比较；该下载不会成为产品分支的父历史。首版发布说明只记录 Hotaru 的独立首提交，后续以产品版本标签比较。

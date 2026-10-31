@@ -3,7 +3,7 @@
 ; 产物: installer\Hotaru-{#MyAppVersion}-setup.exe（按用户安装到 %LOCALAPPDATA%\Programs\Hotaru，无需管理员）
 
 #define MyAppName "Hotaru"
-#define MyAppVersion "1.0.0"
+#define MyAppVersion "1.0.1"
 #define MyAppPublisher "Hotaru"
 #define MyAppExeName "Hotaru.exe"
 

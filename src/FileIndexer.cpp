@@ -15,6 +15,7 @@
 #include <QStandardPaths>
 #include <QStorageInfo>
 #include <QTimer>
+#include <QRegularExpression>
 
 #include <algorithm>
 #include <atomic>
@@ -26,6 +27,48 @@
 #include <winioctl.h>
 
 namespace {
+
+constexpr int kFileMatchLevels = 5;
+constexpr int kFileKindLevels = 3;
+constexpr int kFileBucketCount = kFileMatchLevels * kFileKindLevels;
+
+int fileNameMatchLevel(const QString& name, const QString& query)
+{
+    const QString full = name.toLower();
+    const QString q = query.toLower();
+    const QString stem = QFileInfo(name).completeBaseName().toLower();
+    if (full == q || stem == q)
+        return 0;
+    if (stem.startsWith(q) || full.startsWith(q))
+        return 1;
+    const QStringList words = stem.split(QRegularExpression(QStringLiteral("[\\s\\-_\\.]+")), Qt::SkipEmptyParts);
+    for (const QString& word : words)
+        if (word.startsWith(q))
+            return 2;
+    if (stem.contains(q))
+        return 3;
+    if (full.contains(q))
+        return 4;
+    return -1;
+}
+
+int fileKindLevel(const QString& name, bool isDir)
+{
+    if (isDir)
+        return 2;
+    static const QStringList executableSuffixes = {
+        QStringLiteral("exe"), QStringLiteral("lnk"),
+        QStringLiteral("bat"), QStringLiteral("cmd")
+    };
+    return executableSuffixes.contains(QFileInfo(name).suffix().toLower()) ? 0 : 1;
+}
+
+int fileBucket(const QString& name, const QString& query, bool isDir)
+{
+    const int match = fileNameMatchLevel(name, query);
+    // 应用/脚本优先于普通文件，普通文件优先于文件夹；同一类型内再比较名称相关度。
+    return match < 0 ? -1 : fileKindLevel(name, isDir) * kFileMatchLevels + match;
+}
 
 // 快索引 + 深索引共用的跳过名单（目录名，忽略大小写）
 const QStringList& skipDirNames()
@@ -778,9 +821,8 @@ void FileIndexer::applyUsnDelete(quint64 frn)
 //
 // 老写法是"整表扫 + 每个命中都 fromUtf8 造一条整路径 QString + 收完再排序去重"：
 // 272 万条下一次查询 540~680ms，而绝大多数命中根本活不到前 20 名（输 "no" 时几百万
-// 个命中，每个都白造一个 QString）。这里改四件事，**输出顺序和老写法逐条一致**
-// —— 判据是 main.cpp 的 --searchdump：改前改后各跑一遍，diff 必须为空。
-//   ① 有界分桶：排序键是 (来源, 分数, 名字长度, 路径)，来源×分数一共 8 个桶，每桶只留
+// 个命中，每个都白造一个 QString）。这里保留有界并行扫描，同时把名称主体和目标类型纳入排序。
+//   ① 有界分桶：排序键是 (文件类型, 名称相关度, 来源, 名字长度, 路径)，类型×分数一共 15 个桶，每桶只留
 //      最好的 2×limit 条。为什么 2×limit 够：去重最多再吃掉 limit 条（同一个路径会同时
 //      出现在快索引和深索引里，快索引排前面，深索引那份被丢），所以真正要发出去的
 //      深索引条目一定在深索引前 2×limit 名里；而"全局某桶前 K 名"必然落在"各段同桶
@@ -928,16 +970,18 @@ QVector<FileEntry> FileIndexer::search(const QString& query, int limit) const
     QReadLocker lock(&m_lock);
 
     // ---- 快索引（source 0）：本来就是 QString，不物化新东西 ----
-    QVector<const FileEntry*> qb[4];
+    QVector<const FileEntry*> qb[kFileBucketCount];
     for (const FileEntry& e : m_entries) {
         const int idx = e.name.indexOf(q, 0, Qt::CaseInsensitive);
         if (idx < 0)
             continue;
-        pushQuick(qb[(idx == 0 ? 0 : 2) + (e.isDir ? 0 : 1)], e, cap);
+        const int bucket = fileBucket(e.name, q, e.isDir);
+        if (bucket >= 0)
+            pushQuick(qb[bucket], e, cap);
     }
 
     // ---- 深索引（source 1）：映射快照分段并行 + 增量新增 ----
-    QVector<DeepCand> db[4];
+    QVector<DeepCand> db[kFileBucketCount];
     const QByteArray q8 = q.toLower().toUtf8();
     const char* ne = q8.constData();
     const int neLen = int(q8.size());
@@ -958,13 +1002,13 @@ QVector<FileEntry> FileIndexer::search(const QString& query, int limit) const
             for (quint32 from = 0; from < cnt; from += chunk)
                 segs.append({vi, from, qMin(cnt, from + chunk)});
         }
-        // 每个工作线程自己的 4 个分数桶（slot[线程*4+分数]），最后再并起来
+        // 每个工作线程自己的名称相关度×类型桶（slot[线程*桶数+分数]），最后再并起来
         // （并起来仍等价，见上面①）。用扁平 vector 而不是本地结构体数组：MSVC
         // 对"本地类型 + lambda 捕获 + 范围 for"这套组合会报看不懂的错。
-        std::vector<QVector<DeepCand>> slot(size_t(threads) * 4);
+        std::vector<QVector<DeepCand>> slot(size_t(threads) * kFileBucketCount);
         std::atomic<quint32> next {0};
         const auto work = [&](int t) {
-            QVector<DeepCand>* me = &slot[size_t(t) * 4];
+            QVector<DeepCand>* me = &slot[size_t(t) * kFileBucketCount];
             for (;;) {
                 const quint32 k = next.fetch_add(1);
                 if (k >= quint32(segs.size()))
@@ -990,7 +1034,10 @@ QVector<FileEntry> FileIndexer::search(const QString& query, int limit) const
                     bool astral = false;
                     c.nameSize = qMax(0, utf16LenOf(c.path, c.len, &astral) - c.nameStart);
                     c.astral = astral;
-                    pushBounded(me[(idx == 0 ? 0 : 2) + (c.isDir ? 0 : 1)], c, cap);
+                    const QString name = QString::fromUtf8(arena + de.offset + de.nameStart, nameLen);
+                    const int bucket = fileBucket(name, q, c.isDir);
+                    if (bucket >= 0)
+                        pushBounded(me[bucket], c, cap);
                 }
             }
         };
@@ -1002,7 +1049,7 @@ QVector<FileEntry> FileIndexer::search(const QString& query, int limit) const
             th.join();
         for (size_t i = 0; i < slot.size(); ++i)
             for (const DeepCand& c : slot[i])
-                pushBounded(db[int(i % 4)], c, cap);
+                pushBounded(db[int(i % kFileBucketCount)], c, cap);
     }
 
     // 增量新增那批（几千条量级，留在本线程扫）
@@ -1021,13 +1068,18 @@ QVector<FileEntry> FileIndexer::search(const QString& query, int limit) const
         bool astral = false;
         c.nameSize = qMax(0, utf16LenOf(c.path, c.len, &astral) - c.nameStart);
         c.astral = astral;
-        pushBounded(db[(idx == 0 ? 0 : 2) + (c.isDir ? 0 : 1)], c, cap);
+        const QString name = QString::fromUtf8(nameStart, nameLen);
+        const int bucket = fileBucket(name, q, c.isDir);
+        if (bucket >= 0)
+            pushBounded(db[bucket], c, cap);
     }
 
-    // ---- 按 (来源, 分数, 名字长度, 路径) 发出去，边发边按路径去重 ----
+    // ---- 按 (文件类型, 名称相关度, 来源, 名字长度, 路径) 发出去，边发边按路径去重 ----
     QSet<QString> seen;
-    for (int source = 0; source < 2; ++source) {
-        for (int score = 0; score < 4; ++score) {
+    for (int score = 0; score < kFileBucketCount; ++score) {
+        // 快索引只作为同一相关度桶内的稳定新鲜度优先级，不能把普通快索引文件
+        // 整体排到深索引 exe 前面。
+        for (int source = 0; source < 2; ++source) {
             if (source == 0) {
                 for (const FileEntry* e : qb[score]) {
                     const QString key = e->path.toLower();

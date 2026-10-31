@@ -129,6 +129,10 @@ const QVector<Meta>& scan()
 
 LToolPlugin* plugin(const QString& id)
 {
+    if (isDisabled(id)) {
+        g_loadErrors.insert(id, QStringLiteral("插件已禁用"));
+        return nullptr;
+    }
     if (g_plugins.contains(id))
         return g_plugins.value(id);
     const QVector<Meta>& metas = scan();
@@ -465,7 +469,7 @@ bool feed(const QString& id, const QString& text)
 QString actionOwner(const QString& action)
 {
     for (const Meta& m : scan())
-        if (m.ok() && m.actions.contains(action))
+        if (m.ok() && !isDisabled(m.id) && m.actions.contains(action))
             return m.id;
     return {};
 }
@@ -482,9 +486,14 @@ QString loadErrorOf(const QString& id)
 QString whyNoOwner(const QString& action)
 {
     const QString id = actionOwner(action);
-    if (id.isEmpty())
+    if (id.isEmpty()) {
+        for (const Meta& m : scan())
+            if (m.ok() && m.actions.contains(action) && isDisabled(m.id))
+                return QStringLiteral("动作 %1 的插件 %2 已禁用，因此不会注册或执行对应热键")
+                    .arg(action, m.id);
         return QStringLiteral("没装接 %1 这个动作的插件（ltool-plugins 里是不是缺 %2）")
             .arg(action, Platform::pluginFileName(action));
+    }
     if (plugin(id))
         return QStringLiteral("接 %1 的插件 %2 起来了，可它自己不认这个动作（元数据那份 Actions 和实例报的对不上，见日志）")
             .arg(action, id);
@@ -499,7 +508,7 @@ bool invoke(const QString& action, const QStringList& args, QString* who)
     // 真正接不接**以实例自己报的 actions() 为准** —— 两边不一致就是插件自己乱写，
     // 记一行、接着找下一家。
     for (const Meta& m : scan()) {
-        if (!m.ok() || !m.actions.contains(action))
+        if (!m.ok() || isDisabled(m.id) || !m.actions.contains(action))
             continue;
         LToolPlugin* p = plugin(m.id);       // 起不来它自己已经把原因写进日志
         if (!p)

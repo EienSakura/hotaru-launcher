@@ -6,7 +6,7 @@
 此清单不会自动替换运行时保留的上游插件源；功能适配仍需自行验证。
 
 用法：python tools/make_plugin_index.py --build <DLL目录> --out <清单路径>
-可选 --base-url <下载前缀>；默认 https://github.com/EienSakura/Hotaru/releases/download/v<版本>。
+可选 --base-url <下载前缀>；默认 https://github.com/EienSakura/hotaru-launcher/releases/download/v<版本>。
 缺少产物或 API 不符时非零退出，不生成不完整的清单。
 """
 import argparse
@@ -20,7 +20,7 @@ import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # 额外插件资产与 Hotaru 当前标签绑定；运行时默认商店源独立维护。
-RELEASE_BASE = 'https://github.com/EienSakura/Hotaru/releases/download'
+RELEASE_BASE = 'https://github.com/EienSakura/hotaru-launcher/releases/download'
 
 
 def sha256_of(path):

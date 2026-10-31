@@ -32,8 +32,10 @@ struct SearchResult {
         App,          // 应用：Enter 启动，target=目标 exe（可空），extra=lnk 路径
         File,         // 文件/文件夹：Enter 打开
         Web,          // 网址/网站关键字：Enter 用默认浏览器打开
+        QuickSearch,  // 快捷搜索规则：网页、应用或磁盘文件夹
         Command,      // 命令：rescan / init / path / reg
-        PinnedApp,    // 固定软件：target=配置中的 id
+        PinnedApp,    // 固定软件或磁盘文件夹：target=配置中的 id
+        PinnedGroup,  // 固定面板内部的图标分组：target=groups 中的 id
         PluginEntry,  // 开发环境插件入口
         PluginItem,   // 插件组件（安装/重检）
         RegIssue,     // 注册表问题（Enter 删除）
@@ -99,6 +101,7 @@ public:
 
 signals:
     void hotkeyChanged(const QString& sequence);
+    void hotkeyCaptureActive(bool active);
 
 protected:
     void paintEvent(QPaintEvent* e) override;
@@ -116,9 +119,13 @@ private:
     void rebuildHome();
     void refreshSkin();
     void layoutLauncher();
-    void addPinnedTarget(const QString& id = QString(), int row=-1, int column=-1, bool folder=false);
+    void addPinnedFileOrFolder(const QString& id = QString(), int row=-1, int column=-1, bool folder=false);
+    void createPanelGroup(int row, int column);
+    void addToGroup(int row, int column, bool folder);
     void pinnedMenu(const QString& id,const QPoint& globalPos);
     void renamePinned(const QString& id);
+    bool promptRename(const QString& initial, bool isGroup, QString* result);
+    bool renamePinnedInteractive(const QString& id);
     void deleteCurrentPage();
     void openGroup(const QString& id,int page=0);
     void closeGroup();

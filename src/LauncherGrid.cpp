@@ -43,7 +43,8 @@ LauncherGrid::LauncherGrid(QWidget* parent):QWidget(parent)
 }
 void LauncherGrid::setItems(const QVector<Item>& items,int columns,int rows,int pages)
 {
-    cancelDrag();m_animation.stop();m_settleIndex=-1;m_items=items;m_columns=qBound(3,columns,8);m_selected=-1;
+    cancelDrag();m_animation.stop();m_settleIndex=-1;m_items=items;
+    m_columns=qBound(m_groupMode ? 3 : 4,columns,8);m_selected=-1;
     m_rows=qBound(2,rows,6);m_pages=qMax(1,pages);m_extraPage=-1;m_page=qMin(m_page,pageCount()-1);
     arrange();loadIcons();
     emit pageChanged(m_page,pageCount());
@@ -344,10 +345,18 @@ void LauncherGrid::contextMenuEvent(QContextMenuEvent* e)
     const int index=occupant(cell);
     if (index>=0) {if (m_items[index].app.enabled) emit itemMenuRequested(m_items[index].app.id,e->globalPos());return;}
     QMenu menu(this);Theme::bindMenu(&menu);
-    auto* software=menu.addAction(QStringLiteral("添加软件或脚本…"));auto* folder=menu.addAction(QStringLiteral("添加文件夹…"));
+    auto* software=menu.addAction(QStringLiteral("添加程序或脚本…"));
+    auto* diskFolder=menu.addAction(QStringLiteral("添加磁盘文件夹…"));
+    QAction* panelFolder=nullptr;
+    if (!m_groupMode) {
+        menu.addSeparator();
+        panelFolder=menu.addAction(QStringLiteral("新建面板文件夹"));
+    }
+    menu.addSeparator();
     auto* deletion=menu.addAction(QStringLiteral("删除当前页"));deletion->setEnabled(!m_groupMode && m_pages>1);
     auto* selected=menu.exec(e->globalPos());
     if (selected==deletion) emit deletePageRequested();
-    else if (selected) emit addRequested(cell.y(),cell.x(),selected==folder);
-    Q_UNUSED(software)
+    else if (selected==panelFolder) emit createGroupRequested(cell.y(),cell.x());
+    else if (selected==software) emit addRequested(cell.y(),cell.x(),false);
+    else if (selected==diskFolder) emit addRequested(cell.y(),cell.x(),true);
 }

@@ -40,9 +40,46 @@ QIcon spinnerIcon(int frame)
     return QIcon(pm);
 }
 
+// 设置侧栏使用统一的无文字矢量图标，避免把首个汉字当作图标导致视觉含义不稳定。
+QIcon sectionIcon(int section, const QColor& color)
+{
+    if (section == 1)
+        return Utils::bagIcon(color);
+    QPixmap pm(48, 48);
+    pm.fill(Qt::transparent);
+    QPainter p(&pm);
+    p.setRenderHint(QPainter::Antialiasing);
+    p.setPen(Qt::NoPen);
+    p.setBrush(color);
+    p.drawRoundedRect(QRectF(2, 2, 44, 44), 12, 12);
+    p.setBrush(Qt::NoBrush);
+    p.setPen(QPen(Qt::white, 2.6, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+    if (section == 0) {
+        p.drawEllipse(QRectF(13, 10, 22, 28));
+        p.drawLine(QPointF(13, 24), QPointF(35, 24));
+        p.drawArc(QRectF(18, 10, 12, 28), 90 * 16, 180 * 16);
+        p.drawArc(QRectF(18, 10, 12, 28), 270 * 16, 180 * 16);
+    } else if (section == 2) {
+        p.drawLine(QPointF(13, 15), QPointF(35, 15));
+        p.drawLine(QPointF(13, 24), QPointF(35, 24));
+        p.drawLine(QPointF(13, 33), QPointF(35, 33));
+        p.setBrush(Qt::white);
+        p.drawEllipse(QPointF(20, 15), 3.2, 3.2);
+        p.drawEllipse(QPointF(29, 24), 3.2, 3.2);
+        p.drawEllipse(QPointF(17, 33), 3.2, 3.2);
+    } else {
+        p.drawEllipse(QRectF(13, 13, 22, 22));
+        p.setPen(QPen(Qt::white, 3.2, Qt::SolidLine, Qt::RoundCap));
+        p.drawPoint(QPointF(24, 19));
+        p.drawLine(QPointF(24, 24), QPointF(24, 31));
+    }
+    return QIcon(pm);
+}
+
 // 设置页整体深色主题（子页面共享）
 const char* kSettingsQss = R"QSS(
 QDialog { background: @window; }
+QDialog > QWidget { background: transparent; }
 
 QLabel { color: @text; background: transparent; }
 QLabel#tip { color: @muted; }
@@ -54,7 +91,7 @@ QGroupBox {
     border: 1px solid @line;
     border-radius: 10px;
     margin-top: 16px;
-    padding: 10px 6px 6px 6px;
+    padding: 14px 12px 12px 12px;
     font-weight: 600;
     background: @group;
 }
@@ -146,6 +183,7 @@ QListWidget::item:hover:!selected { background: @hover; }
 QListWidget#menuList {
     font-size: 11pt;
     font-weight: 500;
+    padding: 6px;
 }
 QListWidget#menuList::item {
     padding: 0 10px;
@@ -215,18 +253,18 @@ SettingsDialog::SettingsDialog(QWidget* parent)
     m_menu->setSpacing(5);              // 条目之间留缝，背景块不再首尾相接
     m_menu->setUniformItemSizes(true);
 
-    struct MenuDef { const char* name; QColor color; bool bag; };
+    struct MenuDef { const char* name; QColor color; int section; };
     // 只有四行。语言并进「配置」那一页里的一节，软件 / 下载器 / 定时任务搬成了插件商店里的卡片 ——
     // 颜色沿用它们原来那一行的，一眼还认得出来。
-    // 「插件商店」那一行画的是一颗袋子（其余三行是第一个字）：四个图标里它是唯一"能买东西"的那个。
+    // 每一行都使用独立绘制的矢量图形；插件商店沿用袋子图标，其余页面使用功能图形。
     const MenuDef defs[] = {
-        {"网站", QColor(6, 182, 212), false},    // 活力青碧 (Cyan)：象征网络与探索
-        {"插件商店", QColor(249, 115, 22), true}, // 暖阳珊瑚橙 (Orange)：白色百宝袋在暖橙底上更鲜明
-        {"配置", QColor(59, 130, 246), false},   // 经典科技蓝 (Blue)：沉稳、专业的首选项控制
-        {"关于", QColor(168, 85, 247), false},   // 极光罗兰紫 (Purple)：高雅、醒目的版本与品牌
+        {"快捷搜索", QColor(6, 182, 212), 0},
+        {"插件商店", QColor(249, 115, 22), 1},
+        {"配置", QColor(59, 130, 246), 2},
+        {"关于", QColor(168, 85, 247), 3},
     };
     for (const MenuDef& d : defs) {
-        const QIcon icon = d.bag ? Utils::bagIcon(d.color) : Utils::letterIcon(d.name, d.color);
+        const QIcon icon = sectionIcon(d.section, d.color);
         auto* it = new QListWidgetItem(icon, d.name);
         it->setSizeHint(QSize(0, 50));   // 只约束行高，宽度由视口决定，避免底部滚动条。
         m_menu->addItem(it);
@@ -312,6 +350,7 @@ void SettingsDialog::ensurePage(int index)
         auto* configPage = new ConfigPage(this);
         connect(configPage, &ConfigPage::rescanRequested, this, &SettingsDialog::rescanRequested);
         connect(configPage, &ConfigPage::hotkeyChanged, this, &SettingsDialog::hotkeyChanged);
+        connect(configPage, &ConfigPage::hotkeyCaptureActive, this, &SettingsDialog::hotkeyCaptureActive);
         page = configPage;
         break;
     }
@@ -322,6 +361,14 @@ void SettingsDialog::ensurePage(int index)
     delete old;
     m_stack->insertWidget(index, page);
     m_stack->setCurrentIndex(index);
+}
+
+void SettingsDialog::editQuickSearch(const QString& name)
+{
+    ensurePage(0);
+    m_menu->setCurrentRow(0);
+    if (auto* page = qobject_cast<WebsitesPage*>(m_stack->widget(0)))
+        page->editEntryNamed(name);
 }
 
 // 工具都是 DLL 插件，所以这里只剩一条路：把设置页开到「工具」那一行，再展开那张卡。
