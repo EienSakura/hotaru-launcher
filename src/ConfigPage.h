@@ -9,7 +9,7 @@ class QLabel;
 class QSpinBox;
 class QLineEdit;
 class QRadioButton;
-class QKeySequenceEdit;
+class HotkeyCaptureEdit;
 class QPushButton;
 
 // 配置 - 配置页：开机启动 / 快捷键 / 搜索引擎 / 定时扫描（索引刷新）/ 应用目录 / 剪贴板 / 微软拼音标点
@@ -22,6 +22,7 @@ signals:
     // 保存后通知：快捷键变更 / 索引设置变化需要重扫
     void hotkeyChanged(const QString& sequence);
     void rescanRequested();
+    void hotkeyCaptureActive(bool active);
 
 private slots:
     void onSave();
@@ -42,6 +43,8 @@ private slots:
     void syncThemeControls();
     void importHotaruConfig();
     void exportHotaruConfig();
+    void updateHotkeyStatus();
+    void openHotkeyCapture();
 
 private:
     void load();
@@ -49,7 +52,9 @@ private:
     void refreshPathInfo();
 
     QCheckBox* m_autostart = nullptr;
-    QKeySequenceEdit* m_hotkey = nullptr;
+    HotkeyCaptureEdit* m_hotkey = nullptr;
+    QPushButton* m_hotkeyButton = nullptr;
+    QLabel* m_hotkeyStatus = nullptr;
     QLineEdit* m_installPath = nullptr;
     QLineEdit* m_proxy = nullptr;
     QRadioButton* m_themeDark = nullptr;

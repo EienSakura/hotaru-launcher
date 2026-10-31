@@ -5,8 +5,7 @@
 #include <QStringList>
 #include <QVector>
 
-// 搜索框的"网站关键字"：输入 `ld` 直接打开 linux.do，输入 `gh qt6` 提供"在 GitHub 搜 qt6"。
-// 列表存在 %APPDATA%\ltool\webs.json（一个 JSON 数组），首次运行写两份默认值，用户可增删。
+// 搜索框的快捷搜索规则。新版配置独立保存到 quick-search.json，旧 webs.json 保留为本地备份。
 
 // 一条网站关键字。它放在命名空间外面：调用处（SearchWindow）一直是裸写 WebEntry 的。
 struct WebEntry {
@@ -14,11 +13,13 @@ struct WebEntry {
     QString name;           // 显示名
     QString url;            // 直接打开的地址
     QString searchUrl;      // 可空；里面有 %s，会被换成百分号编码后的查询词
+    QString targetType = QStringLiteral("web"); // web / app / folder
+    QString target;         // web 为 URL，app/folder 为本地路径
 };
 
 namespace WebShortcuts {
 
-// webs.json 不存在就写默认那份（只在启动时调一次）
+// quick-search.json 不存在就写默认规则（只在启动时调一次）
 void ensureDefaultWebs();
 // 默认那份的**字节**（和 ensureDefaultWebs 写出去的完全同一份，判据与搬家都拿它比对，
 // 免得"什么算默认值"这件事有两份答案）。

@@ -174,10 +174,6 @@ bool normalize(PinnedApps::LauncherConfig& cfg, QString* error)
         cells.insert(key(app.groupId,app.gridRow,app.gridColumn));
     }
     cfg.pages=PinnedApps::pageCount(cfg);
-    // 空分组仅在最后一项被移出或移除后消失，单项分组继续保留。
-    cfg.groups.erase(std::remove_if(cfg.groups.begin(),cfg.groups.end(),[&](const auto& g) {
-        return std::none_of(cfg.pinnedApps.cbegin(),cfg.pinnedApps.cend(),[&](const auto& a){return a.groupId==g.id;});
-    }),cfg.groups.end());
     cfg.lastPage=qBound(0,cfg.lastPage,PinnedApps::pageCount(cfg)-1);
     return true;
 }
@@ -253,7 +249,15 @@ bool moveTo(const QString& id,const QString& groupId,int row,int column,QString*
 {
     auto cfg=config();
     for (auto& app : cfg.pinnedApps) if (app.id==id) {
+        const QString oldGroup = app.groupId;
         app.groupId=groupId;app.gridRow=row; app.gridColumn=column;
+        if (!oldGroup.isEmpty() && oldGroup != groupId
+            && std::none_of(cfg.pinnedApps.cbegin(), cfg.pinnedApps.cend(),
+                            [&](const auto& child) { return child.groupId == oldGroup; })) {
+            cfg.groups.erase(std::remove_if(cfg.groups.begin(), cfg.groups.end(),
+                                             [&](const auto& group) { return group.id == oldGroup; }),
+                                             cfg.groups.end());
+        }
         return saveConfig(cfg,error);
     }
     for (auto& group:cfg.groups) if (group.id==id && groupId.isEmpty()) {
@@ -279,6 +283,13 @@ bool remove(const QString& id,QString* error)
     const auto oldSize=cfg.pinnedApps.size();
     cfg.pinnedApps.erase(std::remove_if(cfg.pinnedApps.begin(),cfg.pinnedApps.end(),[&](const auto& a){return a.id==id;}),cfg.pinnedApps.end());
     if (cfg.pinnedApps.size()==oldSize) {if (error) *error=QStringLiteral("固定项已不存在");return false;}
+    QSet<QString> usedGroups;
+    for (const auto& app : cfg.pinnedApps)
+        if (!app.groupId.isEmpty())
+            usedGroups.insert(app.groupId);
+    cfg.groups.erase(std::remove_if(cfg.groups.begin(), cfg.groups.end(),
+                                    [&](const auto& group) { return !usedGroups.contains(group.id); }),
+                     cfg.groups.end());
     return saveConfig(cfg,error);
 }
 
@@ -410,6 +421,38 @@ bool add(PinnedApp app, int row, int column, QString* error)
     app.sortOrder=cfg.pinnedApps.size();
     cfg.pinnedApps << app;
     return saveConfig(cfg,error);
+}
+
+bool createGroup(const QString& title, int row, int column, QString* error)
+{
+    const QString name = title.trimmed();
+    if (name.isEmpty()) {
+        if (error) *error = QStringLiteral("面板文件夹名称不能为空");
+        return false;
+    }
+    auto cfg = config();
+    const QPoint cell = (row < 0 || column < 0)
+        ? firstFreeCell(cfg) : QPoint(column, row);
+    if (cell.x() < 0 || cell.y() < 0 || cell.x() >= cfg.gridColumns
+        || cell.y() > 9999) {
+        if (error) *error = QStringLiteral("面板文件夹格位超出范围");
+        return false;
+    }
+    for (const auto& group : cfg.groups) {
+        if (group.gridRow == cell.y() && group.gridColumn == cell.x()) {
+            if (error) *error = QStringLiteral("目标格位已被占用（含隐藏项），请先选择空格");
+            return false;
+        }
+    }
+    for (const auto& app : cfg.pinnedApps) {
+        if (app.groupId.isEmpty() && app.gridRow == cell.y() && app.gridColumn == cell.x()) {
+            if (error) *error = QStringLiteral("目标格位已被占用（含隐藏项），请先选择空格");
+            return false;
+        }
+    }
+    cfg.groups.append({QUuid::createUuid().toString(QUuid::WithoutBraces), name,
+                       cell.y(), cell.x()});
+    return saveConfig(cfg, error);
 }
 
 QString revealTarget(const PinnedApp& app)

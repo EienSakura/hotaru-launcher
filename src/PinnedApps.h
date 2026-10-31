@@ -65,6 +65,8 @@ bool addPage(QString* error = nullptr);
 bool deletePage(int page, bool migrate, QString* error = nullptr);
 bool pageOccupied(const LauncherConfig& config, int page);
 bool add(PinnedApp app, int row = -1, int column = -1, QString* error = nullptr);
+// 创建固定面板内部的图标分组；它不是磁盘文件夹，不包含真实路径。
+bool createGroup(const QString& title, int row, int column, QString* error = nullptr);
 bool isPinned(const PinnedApp& app);
 bool supportsTarget(const QString& path);
 bool editProperties(const QString& id, QWidget* parent, QString* error = nullptr);

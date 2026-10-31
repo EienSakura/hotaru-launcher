@@ -27,6 +27,7 @@ public:
 signals:
     void activated(const QString& id);
     void addRequested(int row,int column,bool folder);
+    void createGroupRequested(int row,int column);
     void moveRequested(const QString& id,int row,int column);
     void mergeRequested(const QString& sourceId,const QString& targetId);
     void renameRequested(const QString& id);

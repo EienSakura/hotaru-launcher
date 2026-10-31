@@ -8,6 +8,7 @@
 #include "Utils.h"
 #include "PluginStore.h"
 #include "PinnedApps.h"
+#include "platform/SysConfig.h"
 
 #include <QApplication>
 #include <QCheckBox>
@@ -17,30 +18,508 @@
 #include <QFile>
 #include <QFileDialog>
 #include <QFileInfo>
+#include <QFileIconProvider>
 #include <QFormLayout>
 #include <QFrame>
 #include <QGroupBox>
 #include <QTabWidget>
 #include <QScrollArea>
-#include <QKeySequenceEdit>
+#include <QKeySequence>
+#include <QDateTime>
 #include <QLabel>
 #include <QLineEdit>
 #include <QRadioButton>
 #include <QListWidget>
 #include <QMessageBox>
+#include <QDialog>
+#include <QDialogButtonBox>
+#include <QPointer>
+#include <QAbstractNativeEventFilter>
 #include <QPushButton>
 #include <QSettings>
 #include <QSpinBox>
 #include <QSignalBlocker>
-#include <QInputDialog>
 #include <QUrl>
 #include <QVBoxLayout>
+#include <QMimeData>
+#include <QDragEnterEvent>
+#include <QDragMoveEvent>
+#include <QDragLeaveEvent>
+#include <QDropEvent>
+#include <QMouseEvent>
+#include <QKeyEvent>
+#include <QPainter>
+#include <QPen>
+#include <QTimer>
+#include <functional>
 
 #include <windows.h>
 
 #include <algorithm>
 
+// 固定项统一导入卡片：既支持拖放，也把点击选择放在同一个入口，避免程序/文件夹两个入口含义漂移。
+class PinnedDropCard final : public QFrame {
+public:
+    explicit PinnedDropCard(QWidget* parent = nullptr) : QFrame(parent)
+    {
+        setAcceptDrops(true);
+        setCursor(Qt::PointingHandCursor);
+        setMinimumHeight(64);
+        setFrameShape(QFrame::StyledPanel);
+        setStyleSheet(QStringLiteral("QFrame{border:1px dashed palette(mid);border-radius:10px;padding:10px;background:palette(base);}QFrame:hover{border-color:palette(highlight);background:palette(alternate-base);}"));
+        m_dragTimer.setInterval(90);
+        connect(&m_dragTimer, &QTimer::timeout, this, [this] {
+            m_dragPhase = (m_dragPhase + 2) % 20;
+            update();
+        });
+    }
+    std::function<void()> clicked;
+    std::function<void(const QList<QUrl>&)> dropped;
+protected:
+    void mousePressEvent(QMouseEvent* event) override
+    {
+        if (event->button() == Qt::LeftButton && clicked)
+            clicked();
+        QFrame::mousePressEvent(event);
+    }
+    void dragEnterEvent(QDragEnterEvent* event) override
+    {
+        if (!event->mimeData()->hasUrls()) { event->ignore(); return; }
+        setDragFeedback(true);
+        event->acceptProposedAction();
+    }
+    void dragMoveEvent(QDragMoveEvent* event) override
+    {
+        if (event->mimeData()->hasUrls()) { setDragFeedback(true); event->acceptProposedAction(); }
+        else event->ignore();
+    }
+    void dragLeaveEvent(QDragLeaveEvent* event) override
+    {
+        setDragFeedback(false);
+        event->accept();
+    }
+    void dropEvent(QDropEvent* event) override
+    {
+        if (event->mimeData()->hasUrls() && dropped) {
+            dropped(event->mimeData()->urls());
+            event->acceptProposedAction();
+        } else event->ignore();
+        setDragFeedback(false);
+    }
+    void paintEvent(QPaintEvent* event) override
+    {
+        QFrame::paintEvent(event);
+        if (!m_dragActive)
+            return;
+        QPainter painter(this);
+        painter.setRenderHint(QPainter::Antialiasing);
+        const QColor accent = palette().color(QPalette::Highlight);
+        QColor fill = accent;
+        fill.setAlpha(32);
+        const QRectF area = rect().adjusted(2, 2, -2, -2);
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(fill);
+        painter.drawRoundedRect(area, 9, 9);
+        QPen pen(accent, 2, Qt::DashLine);
+        pen.setDashOffset(-m_dragPhase);
+        painter.setBrush(Qt::NoBrush);
+        painter.setPen(pen);
+        painter.drawRoundedRect(area, 9, 9);
+    }
+public:
+    void setDragFeedback(bool active)
+    {
+        if (m_dragActive == active)
+            return;
+        m_dragActive = active;
+        if (active) m_dragTimer.start(); else m_dragTimer.stop();
+        update();
+    }
+
+    QTimer m_dragTimer;
+    int m_dragPhase = 0;
+    bool m_dragActive = false;
+};
+
+// QKeySequenceEdit 会把“只按 Ctrl”当作未完成输入，无法表达双击 Ctrl，
+// 某些键盘布局下 Alt+Space 也会被窗口系统吞掉。这里直接捕获原始按键，
+// 只把一个完整组合交给设置页，避免让 QLineEdit 把它当普通文本处理。
+class HotkeyCaptureEdit final : public QLineEdit {
+public:
+    explicit HotkeyCaptureEdit(QWidget* parent = nullptr) : QLineEdit(parent)
+    {
+        setReadOnly(true);
+        setFocusPolicy(Qt::StrongFocus);
+        setPlaceholderText(QStringLiteral("点击后按下快捷键"));
+        setMinimumHeight(36);
+    }
+    std::function<void()> changed;
+    QKeySequence keySequence() const { return m_sequence; }
+    bool isDoubleCtrl() const { return m_doubleCtrl; }
+    QString hotkeyText() const { return m_doubleCtrl ? QStringLiteral("Ctrl+Ctrl") : m_sequence.toString(); }
+    void setHotkeyText(const QString& text)
+    {
+        m_doubleCtrl = text.compare(QStringLiteral("Ctrl+Ctrl"), Qt::CaseInsensitive) == 0;
+        m_sequence = m_doubleCtrl ? QKeySequence() : QKeySequence(text);
+        m_heldModifiers = Qt::NoModifier;
+        m_lastCtrlPress = 0;
+        m_lastCtrlRelease = 0;
+        setText(m_doubleCtrl ? QStringLiteral("Ctrl+Ctrl（双击）") : m_sequence.toString());
+    }
+    void setDoubleCtrl()
+    {
+        m_doubleCtrl = true;
+        m_sequence = QKeySequence();
+        m_heldModifiers = Qt::NoModifier;
+        setText(QStringLiteral("Ctrl+Ctrl（双击）"));
+        if (changed) changed();
+    }
+    void clearHotkey()
+    {
+        m_doubleCtrl = false;
+        m_sequence = QKeySequence();
+        m_heldModifiers = Qt::NoModifier;
+        m_lastCtrlPress = 0;
+        m_lastCtrlRelease = 0;
+        clear();
+        if (changed) changed();
+    }
+protected:
+    void keyPressEvent(QKeyEvent* event) override
+    {
+        if (event->isAutoRepeat()) return;
+        const int key = event->key();
+        if (key == Qt::Key_Control) {
+            const qint64 now = QDateTime::currentMSecsSinceEpoch();
+            if (m_heldModifiers == Qt::NoModifier
+                && ((m_lastCtrlPress > 0 && now - m_lastCtrlPress <= 520)
+                || (m_lastCtrlRelease > 0 && now - m_lastCtrlRelease <= 520))) {
+                setDoubleCtrl();
+                m_lastCtrlPress = 0;
+                m_lastCtrlRelease = 0;
+            } else {
+                m_waitingCtrl = true;
+                m_lastCtrlPress = now;
+                m_heldModifiers |= Qt::ControlModifier;
+                setText(modifierText(m_heldModifiers)
+                        + QStringLiteral(" · 再按一次确认双击，或继续按主键"));
+            }
+            event->accept();
+            return;
+        }
+        const Qt::KeyboardModifiers modifier = modifierForKey(key);
+        if (modifier != Qt::NoModifier) {
+            m_heldModifiers |= modifier;
+            if (key != Qt::Key_Control)
+                m_lastCtrlPress = 0;
+            setText(modifierText(m_heldModifiers) + QStringLiteral(" · 继续按主键"));
+            event->accept();
+            return;
+        }
+        if (key == Qt::Key_Escape || key == Qt::Key_Backspace || key == Qt::Key_Delete) {
+            clearHotkey(); event->accept(); return;
+        }
+        Qt::KeyboardModifiers mods = m_heldModifiers
+            | (event->modifiers() & (Qt::ControlModifier | Qt::AltModifier
+                                     | Qt::ShiftModifier | Qt::MetaModifier));
+        if (!mods) {
+            setText(QStringLiteral("格式无效：需要 Ctrl、Alt、Shift 或 Win 加主键"));
+            m_sequence = QKeySequence(); m_doubleCtrl = false;
+            if (changed) changed();
+            event->accept(); return;
+        }
+        m_doubleCtrl = false;
+        m_lastCtrlPress = 0;
+        m_lastCtrlRelease = 0;
+        m_sequence = QKeySequence(int(mods) | key);
+        setText(m_sequence.toString());
+        if (changed) changed();
+        event->accept();
+    }
+    void keyReleaseEvent(QKeyEvent* event) override
+    {
+        const Qt::KeyboardModifiers modifier = modifierForKey(event->key());
+        if (!event->isAutoRepeat() && event->key() == Qt::Key_Control) {
+            m_waitingCtrl = false;
+            m_lastCtrlRelease = QDateTime::currentMSecsSinceEpoch();
+        }
+        if (!event->isAutoRepeat() && modifier != Qt::NoModifier)
+            m_heldModifiers &= ~modifier;
+        event->accept();
+    }
+private:
+    static Qt::KeyboardModifiers modifierForKey(int key)
+    {
+        if (key == Qt::Key_Control) return Qt::ControlModifier;
+        if (key == Qt::Key_Alt) return Qt::AltModifier;
+        if (key == Qt::Key_Shift) return Qt::ShiftModifier;
+        if (key == Qt::Key_Meta) return Qt::MetaModifier;
+        return Qt::NoModifier;
+    }
+
+    static QString modifierText(Qt::KeyboardModifiers modifiers)
+    {
+        QStringList parts;
+        if (modifiers & Qt::ControlModifier) parts << QStringLiteral("Ctrl");
+        if (modifiers & Qt::AltModifier) parts << QStringLiteral("Alt");
+        if (modifiers & Qt::ShiftModifier) parts << QStringLiteral("Shift");
+        if (modifiers & Qt::MetaModifier) parts << QStringLiteral("Win");
+        return parts.join(QLatin1Char('+'));
+    }
+
+    QKeySequence m_sequence;
+    Qt::KeyboardModifiers m_heldModifiers = Qt::NoModifier;
+    qint64 m_lastCtrlPress = 0;
+    qint64 m_lastCtrlRelease = 0;
+    bool m_waitingCtrl = false;
+    bool m_doubleCtrl = false;
+};
+
+// Alt+Space 会以 WM_SYSKEYDOWN 进入窗口，Windows 默认会先把它交给系统菜单，
+// 仅靠 Qt 的 keyPressEvent 收不到这一下。二级捕获窗在原生消息层先截获键盘消息，
+// 再转成 Qt 事件交给 HotkeyCaptureEdit，同时阻止系统菜单和主窗口继续处理。
+class HotkeyCaptureDialog final : public QDialog {
+public:
+    explicit HotkeyCaptureDialog(HotkeyCaptureEdit* editor, QWidget* parent = nullptr)
+        : QDialog(parent), m_editor(editor) {}
+
+protected:
+    bool nativeEvent(const QByteArray& eventType, void* message, qintptr* result) override
+    {
+        if (eventType != QByteArrayLiteral("windows_generic_MSG")
+            && eventType != QByteArrayLiteral("windows_dispatcher_MSG"))
+            return QDialog::nativeEvent(eventType, message, result);
+        auto* msg = static_cast<MSG*>(message);
+        if (!msg || !m_editor)
+            return QDialog::nativeEvent(eventType, message, result);
+        if (msg->message == WM_SYSCOMMAND
+            && (msg->wParam & 0xfff0) == SC_KEYMENU) {
+            if (result)
+                *result = 0;
+            return true;
+        }
+        if (!m_editor->hasFocus())
+            return QDialog::nativeEvent(eventType, message, result);
+        const bool press = msg->message == WM_KEYDOWN || msg->message == WM_SYSKEYDOWN;
+        const bool release = msg->message == WM_KEYUP || msg->message == WM_SYSKEYUP;
+        if (!press && !release)
+            return QDialog::nativeEvent(eventType, message, result);
+        const Qt::Key key = qtKeyFromVirtual(static_cast<UINT>(msg->wParam));
+        if (key == Qt::Key_unknown)
+            return QDialog::nativeEvent(eventType, message, result);
+        if (press && key == Qt::Key_Escape) {
+            reject();
+            if (result)
+                *result = 0;
+            return true;
+        }
+        const auto modifiers = currentModifiers();
+        const bool repeat = press && ((msg->lParam & (1LL << 30)) != 0);
+        QKeyEvent event(press ? QEvent::KeyPress : QEvent::KeyRelease,
+                        key, modifiers, QString(), repeat, 1);
+        QApplication::sendEvent(m_editor, &event);
+        if (result)
+            *result = 0;
+        return true;
+    }
+
+public:
+    static Qt::KeyboardModifiers currentModifiers()
+    {
+        Qt::KeyboardModifiers modifiers = Qt::NoModifier;
+        if (GetKeyState(VK_CONTROL) & 0x8000) modifiers |= Qt::ControlModifier;
+        if (GetKeyState(VK_MENU) & 0x8000) modifiers |= Qt::AltModifier;
+        if (GetKeyState(VK_SHIFT) & 0x8000) modifiers |= Qt::ShiftModifier;
+        if ((GetKeyState(VK_LWIN) & 0x8000) || (GetKeyState(VK_RWIN) & 0x8000))
+            modifiers |= Qt::MetaModifier;
+        return modifiers;
+    }
+
+    static Qt::Key qtKeyFromVirtual(UINT vk)
+    {
+        if (vk >= 'A' && vk <= 'Z') return static_cast<Qt::Key>(int(Qt::Key_A) + int(vk - 'A'));
+        if (vk >= '0' && vk <= '9') return static_cast<Qt::Key>(int(Qt::Key_0) + int(vk - '0'));
+        if (vk >= VK_F1 && vk <= VK_F24) return static_cast<Qt::Key>(int(Qt::Key_F1) + int(vk - VK_F1));
+        switch (vk) {
+        case VK_CONTROL: case VK_LCONTROL: case VK_RCONTROL: return Qt::Key_Control;
+        case VK_MENU: case VK_LMENU: case VK_RMENU: return Qt::Key_Alt;
+        case VK_SHIFT: case VK_LSHIFT: case VK_RSHIFT: return Qt::Key_Shift;
+        case VK_LWIN: case VK_RWIN: return Qt::Key_Meta;
+        case VK_SPACE: return Qt::Key_Space;
+        case VK_TAB: return Qt::Key_Tab;
+        case VK_RETURN: return Qt::Key_Return;
+        case VK_ESCAPE: return Qt::Key_Escape;
+        case VK_BACK: return Qt::Key_Backspace;
+        case VK_DELETE: return Qt::Key_Delete;
+        case VK_INSERT: return Qt::Key_Insert;
+        case VK_HOME: return Qt::Key_Home;
+        case VK_END: return Qt::Key_End;
+        case VK_LEFT: return Qt::Key_Left;
+        case VK_RIGHT: return Qt::Key_Right;
+        case VK_UP: return Qt::Key_Up;
+        case VK_DOWN: return Qt::Key_Down;
+        case VK_PRIOR: return Qt::Key_PageUp;
+        case VK_NEXT: return Qt::Key_PageDown;
+        case VK_OEM_COMMA: return Qt::Key_Comma;
+        case VK_OEM_PERIOD: return Qt::Key_Period;
+        case VK_OEM_2: return Qt::Key_Slash;
+        case VK_OEM_5: return Qt::Key_Backslash;
+        case VK_OEM_1: return Qt::Key_Semicolon;
+        case VK_OEM_7: return Qt::Key_Apostrophe;
+        case VK_OEM_4: return Qt::Key_BracketLeft;
+        case VK_OEM_6: return Qt::Key_BracketRight;
+        case VK_OEM_MINUS: return Qt::Key_Minus;
+        case VK_OEM_PLUS: return Qt::Key_Equal;
+        default: return Qt::Key_unknown;
+        }
+    }
+
+private:
+    QPointer<HotkeyCaptureEdit> m_editor;
+};
+
+// QDialog::nativeEvent 在不同 Qt/Windows 组合下不一定能拿到发给输入焦点的
+// WM_SYSKEYDOWN；全局原生过滤器在弹窗存活期间补上这一层，保证 Ctrl/Alt/主键
+// 每一次按下都能实时送到编辑控件。
+class HotkeyCaptureNativeFilter final : public QAbstractNativeEventFilter {
+public:
+    explicit HotkeyCaptureNativeFilter(HotkeyCaptureEdit* editor) : m_editor(editor) {}
+
+    bool nativeEventFilter(const QByteArray& eventType, void* message, qint64* result) override
+    {
+        if (eventType != QByteArrayLiteral("windows_generic_MSG")
+            && eventType != QByteArrayLiteral("windows_dispatcher_MSG"))
+            return false;
+        auto* msg = static_cast<MSG*>(message);
+        if (!msg || !m_editor)
+            return false;
+        if (msg->message == WM_SYSCOMMAND
+            && (msg->wParam & 0xfff0) == SC_KEYMENU) {
+            if (result) *result = 0;
+            return true;
+        }
+        const bool press = msg->message == WM_KEYDOWN || msg->message == WM_SYSKEYDOWN;
+        const bool release = msg->message == WM_KEYUP || msg->message == WM_SYSKEYUP;
+        if (!press && !release)
+            return false;
+        const Qt::Key key = HotkeyCaptureDialog::qtKeyFromVirtual(static_cast<UINT>(msg->wParam));
+        if (key == Qt::Key_unknown)
+            return false;
+        if (key == Qt::Key_Escape)
+            return false;
+        // 回车交给按钮，Esc 交给 QDialog 取消；其余键在捕获期间都必须吞掉，
+        // 即使焦点刚好还停在弹窗标题或按钮上，也不能落到系统/主窗口。
+        if (!m_editor->hasFocus() && (key == Qt::Key_Return || key == Qt::Key_Enter
+                                      || key == Qt::Key_Escape))
+            return false;
+        const bool repeat = press && ((msg->lParam & (1LL << 30)) != 0);
+        QKeyEvent event(press ? QEvent::KeyPress : QEvent::KeyRelease,
+                        key, HotkeyCaptureDialog::currentModifiers(), QString(), repeat, 1);
+        QApplication::sendEvent(m_editor, &event);
+        if (result) *result = 0;
+        return true;
+    }
+
+private:
+    QPointer<HotkeyCaptureEdit> m_editor;
+};
+
+QString choosePinnedTarget(QWidget* parent)
+{
+    QDialog dialog(parent);
+    dialog.setWindowTitle(QStringLiteral("添加固定项"));
+    dialog.setMinimumWidth(520);
+    auto* root = new QVBoxLayout(&dialog);
+    root->setContentsMargins(24, 22, 24, 20);
+    root->setSpacing(12);
+    auto* title = new QLabel(QStringLiteral("添加到固定面板"), &dialog);
+    title->setStyleSheet(QStringLiteral("font-size:17pt;font-weight:600;"));
+    root->addWidget(title);
+    auto* hint = new QLabel(QStringLiteral("选择一种目标类型。每次添加一个目标，磁盘文件夹会作为固定项保存。"), &dialog);
+    hint->setObjectName(QStringLiteral("muted")); hint->setWordWrap(true); root->addWidget(hint);
+    auto* cards = new QHBoxLayout; cards->setSpacing(12);
+    auto* app = new QPushButton(QStringLiteral("程序或脚本\n.exe · .lnk · .bat · .cmd"), &dialog);
+    auto* folder = new QPushButton(QStringLiteral("磁盘文件夹\n打开真实目录"), &dialog);
+    for (auto* button : {app, folder}) {
+        button->setMinimumHeight(88);
+        button->setCursor(Qt::PointingHandCursor);
+        button->setStyleSheet(QStringLiteral("QPushButton{text-align:left;padding:14px;border:1px solid palette(mid);border-radius:10px;font-size:11pt;}QPushButton:hover{border-color:palette(highlight);background:palette(alternate-base);}"));
+        cards->addWidget(button, 1);
+    }
+    root->addLayout(cards);
+    auto* drop = new PinnedDropCard(&dialog);
+    auto* dropLay = new QHBoxLayout(drop);
+    dropLay->setContentsMargins(14, 10, 14, 10);
+    auto* dropText = new QLabel(QStringLiteral("拖入程序、脚本或磁盘文件夹 · 拖入后自动填写目标"), drop);
+    dropText->setObjectName(QStringLiteral("muted"));
+    dropText->setWordWrap(true);
+    dropLay->addWidget(dropText, 1);
+    root->addWidget(drop);
+    auto* cancel = new QPushButton(QStringLiteral("取消"), &dialog); cancel->setObjectName(QStringLiteral("secondary"));
+    root->addWidget(cancel, 0, Qt::AlignRight);
+    QString path;
+    drop->dropped = [&](const QList<QUrl>& urls) {
+        if (urls.size() != 1) { dropText->setText(QStringLiteral("一次只能拖入一个目标")); return; }
+        if (!urls.first().isLocalFile()) { dropText->setText(QStringLiteral("只能拖入本地文件或文件夹")); return; }
+        const QString candidate = urls.first().toLocalFile();
+        if (!PinnedApps::supportsTarget(candidate)) { dropText->setText(QStringLiteral("目标类型不支持，请拖入 exe、lnk、bat、cmd 或文件夹")); return; }
+        path = candidate;
+        dropText->setText(QStringLiteral("已填入：%1").arg(QFileInfo(candidate).fileName().isEmpty()
+                                                              ? candidate : QFileInfo(candidate).fileName()));
+        dialog.accept();
+    };
+    QObject::connect(cancel, &QPushButton::clicked, &dialog, &QDialog::reject);
+    QObject::connect(app, &QPushButton::clicked, &dialog, [&] {
+        path = QFileDialog::getOpenFileName(&dialog, QStringLiteral("选择程序或脚本"), QDir::rootPath(),
+                                            QStringLiteral("程序和脚本 (*.exe *.lnk *.bat *.cmd);;所有文件 (*.*)"));
+        if (!path.isEmpty()) dialog.accept();
+    });
+    QObject::connect(folder, &QPushButton::clicked, &dialog, [&] {
+        path = QFileDialog::getExistingDirectory(&dialog, QStringLiteral("选择磁盘文件夹"));
+        if (!path.isEmpty()) dialog.accept();
+    });
+    return dialog.exec() == QDialog::Accepted ? path : QString();
+}
+
 namespace {
+
+bool configKeySequenceToHotkey(const QKeySequence& sequence, UINT* mods, UINT* vk)
+{
+    if (!mods || !vk || sequence.count() != 1) return false;
+    const auto combo = sequence[0];
+    const auto key = combo.key();
+    UINT m = 0;
+    const auto qm = combo.keyboardModifiers();
+    if (qm & Qt::ControlModifier) m |= MOD_CONTROL;
+    if (qm & Qt::AltModifier) m |= MOD_ALT;
+    if (qm & Qt::ShiftModifier) m |= MOD_SHIFT;
+    if (qm & Qt::MetaModifier) m |= MOD_WIN;
+    UINT k = 0;
+    if (key >= Qt::Key_A && key <= Qt::Key_Z) k = 'A' + UINT(key - Qt::Key_A);
+    else if (key >= Qt::Key_0 && key <= Qt::Key_9) k = '0' + UINT(key - Qt::Key_0);
+    else if (key >= Qt::Key_F1 && key <= Qt::Key_F24) k = VK_F1 + UINT(key - Qt::Key_F1);
+    else {
+        switch (key) {
+        case Qt::Key_Space: k = VK_SPACE; break; case Qt::Key_Tab: k = VK_TAB; break;
+        case Qt::Key_Return: case Qt::Key_Enter: k = VK_RETURN; break; case Qt::Key_Escape: k = VK_ESCAPE; break;
+        case Qt::Key_Backspace: k = VK_BACK; break; case Qt::Key_Delete: k = VK_DELETE; break;
+        case Qt::Key_Insert: k = VK_INSERT; break; case Qt::Key_Home: k = VK_HOME; break; case Qt::Key_End: k = VK_END; break;
+        case Qt::Key_Left: k = VK_LEFT; break; case Qt::Key_Right: k = VK_RIGHT; break;
+        case Qt::Key_Up: k = VK_UP; break; case Qt::Key_Down: k = VK_DOWN; break;
+        case Qt::Key_PageUp: k = VK_PRIOR; break; case Qt::Key_PageDown: k = VK_NEXT; break;
+        case Qt::Key_Comma: k = VK_OEM_COMMA; break; case Qt::Key_Period: k = VK_OEM_PERIOD; break;
+        case Qt::Key_Slash: k = VK_OEM_2; break; case Qt::Key_Backslash: k = VK_OEM_5; break;
+        case Qt::Key_Semicolon: k = VK_OEM_1; break; case Qt::Key_Apostrophe: k = VK_OEM_7; break;
+        case Qt::Key_BracketLeft: k = VK_OEM_4; break; case Qt::Key_BracketRight: k = VK_OEM_6; break;
+        case Qt::Key_Minus: k = VK_OEM_MINUS; break; case Qt::Key_Equal: k = VK_OEM_PLUS; break;
+        case Qt::Key_Plus: k = VK_ADD; break; case Qt::Key_Asterisk: k = VK_MULTIPLY; break;
+        default: break;
+        }
+    }
+    const bool functionKey = key >= Qt::Key_F1 && key <= Qt::Key_F24;
+    if (!k || (!m && !functionKey)) return false;
+    *mods = m; *vk = k; return true;
+}
 
 // 微软拼音"中文输入时使用英文标点"不是 ltool 自己的设置，它是系统的一个 DWORD：
 // HKCU\Software\Microsoft\InputMethod\Settings\CHS。写它 = 去
@@ -165,17 +644,58 @@ ConfigPage::ConfigPage(QWidget* parent)
     outer->addWidget(tabs, 1);
     auto* lay = new QVBoxLayout(body);
     lay->setContentsMargins(12, 4, 4, 4);
+    lay->setSpacing(16);
 
     auto* general = new QGroupBox("通用", this);
     auto* generalLay = new QFormLayout(general);
     m_autostart = new QCheckBox("开机自动启动 Hotaru", general);
     generalLay->addRow(m_autostart);
-    m_hotkey = new QKeySequenceEdit(general);
-    m_hotkey->setToolTip("呼出/隐藏搜索框的全局热键（至少包含一个修饰键）");
-    generalLay->addRow("呼出快捷键：", m_hotkey);
+    auto* hotkeyRow = new QWidget(general);
+    auto* hotkeyLay = new QHBoxLayout(hotkeyRow);
+    hotkeyLay->setContentsMargins(0, 0, 0, 0);
+    m_hotkey = new HotkeyCaptureEdit(hotkeyRow);
+    m_hotkey->setObjectName(QStringLiteral("hotkeyCapture"));
+    m_hotkey->setVisible(false);
+    m_hotkeyButton = new QPushButton(QStringLiteral("点击录入快捷键…"), hotkeyRow);
+    m_hotkeyButton->setObjectName(QStringLiteral("hotkeyCaptureButton"));
+    m_hotkeyButton->setMinimumHeight(36);
+    m_hotkeyButton->setCursor(Qt::PointingHandCursor);
+    hotkeyLay->addWidget(m_hotkeyButton, 1);
+    generalLay->addRow(QStringLiteral("呼出快捷键："), hotkeyRow);
+    m_hotkeyStatus = new QLabel(general);
+    m_hotkeyStatus->setObjectName(QStringLiteral("muted"));
+    generalLay->addRow(QString(), m_hotkeyStatus);
+    m_hotkey->changed = [this] {
+        updateHotkeyStatus();
+    };
+    connect(m_hotkeyButton, &QPushButton::clicked, this, &ConfigPage::openHotkeyCapture);
+    m_hotkeyButton->setToolTip(QStringLiteral("点击后在二级弹窗中按下 Alt+Space、Ctrl+K、Ctrl+Alt+K 或双击 Ctrl"));
     m_installPath = new QLineEdit(general);
-    m_installPath->setPlaceholderText("D:\\software");
-    generalLay->addRow("软件安装路径：", m_installPath);
+    m_installPath->setPlaceholderText(QDir::toNativeSeparators(Platform::defaultInstallRoot()));
+    m_installPath->setClearButtonEnabled(true);
+    auto* installRow = new QWidget(general);
+    auto* installLay = new QHBoxLayout(installRow);
+    installLay->setContentsMargins(0, 0, 0, 0);
+    auto* browseInstall = new QPushButton(QStringLiteral("浏览…"), installRow);
+    auto* clearInstall = new QPushButton(QStringLiteral("清空"), installRow);
+    installLay->addWidget(m_installPath, 1);
+    installLay->addWidget(browseInstall);
+    installLay->addWidget(clearInstall);
+    generalLay->addRow(QStringLiteral("第三方软件安装根目录："), installRow);
+    auto* installInfo = new QLabel(
+        QStringLiteral("用于 winget 安装第三方工具时的 --location，不是 Hotaru 自身安装目录；清空后由安装器决定位置。"), general);
+    installInfo->setObjectName(QStringLiteral("muted"));
+    installInfo->setWordWrap(true);
+    generalLay->addRow(QString(), installInfo);
+    connect(browseInstall, &QPushButton::clicked, this, [this] {
+        const QString start = m_installPath->text().trimmed().isEmpty()
+            ? Platform::defaultInstallRoot() : m_installPath->text().trimmed();
+        const QString path = QFileDialog::getExistingDirectory(
+            this, QStringLiteral("选择第三方软件安装根目录"), start);
+        if (!path.isEmpty())
+            m_installPath->setText(QDir::toNativeSeparators(path));
+    });
+    connect(clearInstall, &QPushButton::clicked, m_installPath, &QLineEdit::clear);
     m_proxy = new QLineEdit(general);
     if (const QString sys = DevEnv::systemProxyUrl(); !sys.isEmpty()) {
         m_proxy->setPlaceholderText(QString("留空 = 自动用系统代理（当前检测到 %1）").arg(sys));
@@ -392,7 +912,6 @@ ConfigPage::ConfigPage(QWidget* parent)
     auto* appearanceLayBox = new QVBoxLayout(appearancePage);
     appearanceLayBox->setContentsMargins(12, 12, 12, 12);
     appearanceLayBox->addWidget(appearance);
-    appearanceLayBox->addStretch(1);   // 这一页东西少，别把分组框拉到整页高
     // 外观：夜间 / 日间。拨一下就当场生效（Theme::setMode 会重刷调色板、两份弹层样式表，
     // 并给每个顶层窗口发一次 ThemeChange），不用按保存、也不用重启。
     auto* themeRow = new QWidget(appearance);
@@ -447,7 +966,15 @@ ConfigPage::ConfigPage(QWidget* parent)
     m_gridRows->setObjectName(QStringLiteral("gridRows"));
     m_gridRows->setRange(2,6);m_gridRows->setSuffix(QStringLiteral(" 行"));
     auto* gridSize=new QWidget(pinned);auto* gridSizeLayout=new QHBoxLayout(gridSize);
-    gridSizeLayout->setContentsMargins(0,0,0,0);gridSizeLayout->addWidget(m_gridRows);gridSizeLayout->addWidget(m_gridColumns);
+    gridSizeLayout->setContentsMargins(0,0,0,0);
+    gridSizeLayout->setSpacing(8);
+    gridSizeLayout->addWidget(new QLabel(QStringLiteral("行"), gridSize));
+    gridSizeLayout->addWidget(m_gridRows);
+    gridSizeLayout->addWidget(new QLabel(QStringLiteral("列"), gridSize));
+    gridSizeLayout->addWidget(m_gridColumns);
+    auto* capacity = new QLabel(QStringLiteral("主面板范围：4–8 列、2–6 行；分组面板固定 3×3。"), gridSize);
+    capacity->setObjectName(QStringLiteral("muted"));
+    gridSizeLayout->addWidget(capacity, 1);
     pinnedLay->addRow(QStringLiteral("每页网格："), gridSize);
     m_pageStart=new QComboBox(pinned);m_pageStart->setObjectName(QStringLiteral("pageStart"));
     m_pageStart->addItem(QStringLiteral("每次打开回到首页"),false);
@@ -455,12 +982,12 @@ ConfigPage::ConfigPage(QWidget* parent)
     pinnedLay->addRow(QStringLiteral("打开面板时："),m_pageStart);
     m_pinnedApps = new QListWidget(pinned);
     m_pinnedApps->setObjectName(QStringLiteral("pinnedApps"));
-    m_pinnedApps->setMinimumHeight(120);
-    m_pinnedApps->setMaximumHeight(190);
+    m_pinnedApps->setMinimumHeight(160);
+    m_pinnedApps->setMinimumHeight(220);
+    m_pinnedApps->setMaximumHeight(420);
     auto* pinnedRow = new QWidget(pinned);
     auto* pinnedRowLay = new QHBoxLayout(pinnedRow);
     pinnedRowLay->setContentsMargins(0, 0, 0, 0);
-    auto* addPinned = new QPushButton(QStringLiteral("添加程序…"), pinnedRow);
     auto* togglePinned = new QPushButton(QStringLiteral("启用/禁用"), pinnedRow);
     auto* editPinned = new QPushButton(QStringLiteral("编辑"), pinnedRow);
     auto* upPinned = new QPushButton(QStringLiteral("格位…"), pinnedRow);
@@ -468,6 +995,11 @@ ConfigPage::ConfigPage(QWidget* parent)
     auto* removePinned = new QPushButton(QStringLiteral("移除"), pinnedRow);
     auto* importConfig = new QPushButton(QStringLiteral("导入配置"), pinnedRow);
     auto* exportConfig = new QPushButton(QStringLiteral("导出配置"), pinnedRow);
+    auto* addPinned = new QPushButton(QStringLiteral("添加固定项…"), pinnedRow);
+    addPinned->setObjectName(QStringLiteral("pinnedAddButton"));
+    addPinned->setMinimumHeight(30);
+    addPinned->setCursor(Qt::PointingHandCursor);
+    Theme::bind(addPinned, "QPushButton#pinnedAddButton{background:@button;color:@text;border:1px solid @borderHi;border-radius:6px;padding:5px 10px;}QPushButton#pinnedAddButton:hover{background:@buttonUp;border-color:@borderHiUp;}QPushButton#pinnedAddButton:pressed{background:@buttonDown;}");
     pinnedRowLay->addWidget(addPinned);
     pinnedRowLay->addWidget(togglePinned);
     pinnedRowLay->addWidget(editPinned);
@@ -490,14 +1022,6 @@ ConfigPage::ConfigPage(QWidget* parent)
     connect(m_themePackages, qOverload<int>(&QComboBox::currentIndexChanged),
             this, &ConfigPage::activateThemePackage);
     connect(addPinned, &QPushButton::clicked, this, &ConfigPage::addPinnedApp);
-    auto* addFolder=new QPushButton(QStringLiteral("添加文件夹…"),pinnedRow);
-    pinnedRowLay->insertWidget(1,addFolder);
-    connect(addFolder,&QPushButton::clicked,this,[this] {
-        const QString path=QFileDialog::getExistingDirectory(this,QStringLiteral("选择固定文件夹"));
-        if (path.isEmpty()) return;
-        QString error;if (!PinnedApps::add(PinnedApps::fromTarget(path),-1,-1,&error)) m_pinnedAppsInfo->setText(error);
-        else load();
-    });
     connect(togglePinned, &QPushButton::clicked, this, &ConfigPage::togglePinnedApp);
     connect(editPinned, &QPushButton::clicked, this, &ConfigPage::editPinnedApp);
     connect(upPinned, &QPushButton::clicked, this, &ConfigPage::movePinnedUp);
@@ -510,8 +1034,13 @@ ConfigPage::ConfigPage(QWidget* parent)
     auto* save = new QPushButton("保存", this);
     save->setDefault(true);
     save->setObjectName("primary");
+    save->setMinimumWidth(92);
+    save->setStyleSheet(QStringLiteral("QPushButton#primary{background:#3b82f6;color:#ffffff;border:1px solid #3b82f6;border-radius:8px;padding:7px 18px;font-weight:600;}QPushButton#primary:hover{background:#60a5fa;}QPushButton#primary:pressed{background:#2563eb;}"));
     auto* btnLay = new QHBoxLayout;
+    btnLay->setContentsMargins(12, 4, 12, 10);
+    btnLay->setSpacing(10);
     btnLay->addStretch(1);
+    save->setMinimumHeight(36);
     btnLay->addWidget(save);
     lay->addWidget(general);
     lay->addWidget(shell);
@@ -520,7 +1049,7 @@ ConfigPage::ConfigPage(QWidget* parent)
     lay->addWidget(appDirs);
     lay->addWidget(clip);
     lay->addWidget(data);
-    outer->addLayout(btnLay);
+    outer->addLayout(btnLay, 0);
 
     connect(save, &QPushButton::clicked, this, &ConfigPage::onSave);
     connect(openBtn, &QPushButton::clicked, this, &ConfigPage::onOpenDataDir);
@@ -542,8 +1071,16 @@ void ConfigPage::load()
     QSettings cfg(Utils::dataDir() + "/config.ini", QSettings::IniFormat);
     const PinnedApps::LauncherConfig hotaruCfg = PinnedApps::config();
     m_autostart->setChecked(Platform::autostartEnabled());
-    m_hotkey->setKeySequence(QKeySequence(cfg.value("general/hotkey", "Alt+Space").toString()));
-    m_installPath->setText(cfg.value("install/path", "D:\\software").toString());
+    const QString configuredHotkey = cfg.value("general/hotkey", "Alt+Space").toString();
+    const bool doubleCtrl = configuredHotkey.compare(QStringLiteral("Ctrl+Ctrl"), Qt::CaseInsensitive) == 0;
+    m_hotkey->setHotkeyText(doubleCtrl ? QStringLiteral("Ctrl+Ctrl") : configuredHotkey);
+    m_hotkeyButton->setText(doubleCtrl ? QStringLiteral("双击 Ctrl（点击修改）")
+                                       : (m_hotkey->hotkeyText().isEmpty()
+                                              ? QStringLiteral("点击录入快捷键…")
+                                              : m_hotkey->hotkeyText()));
+    m_hotkeyButton->setEnabled(true);
+    updateHotkeyStatus();
+    m_installPath->setText(cfg.value("install/path", Platform::defaultInstallRoot()).toString());
     m_proxy->setText(cfg.value("net/proxy").toString());
     m_storeUrl->setText(cfg.value("store/indexUrl").toString());
     m_storeMirrors->setText(cfg.value("store/mirrors").toString());
@@ -604,9 +1141,15 @@ void ConfigPage::load()
     for (const PinnedApp& app : pinnedApps) {
         auto* item = new QListWidgetItem(m_pinnedApps);
         item->setData(Qt::UserRole, app.id);
-        item->setText(QStringLiteral("[%1] %2\n%3")
-                          .arg(app.enabled ? QStringLiteral("启用") : QStringLiteral("停用"),
-                               app.title, app.targetPath));
+        QFileIconProvider provider;
+        const QString kind = PinnedApps::targetType(app) == QLatin1String("folder")
+            ? QStringLiteral("磁盘文件夹") : QStringLiteral("程序或脚本");
+        item->setIcon(provider.icon(QFileInfo(app.targetPath)));
+        item->setSizeHint(QSize(0, 64));
+        item->setText(QStringLiteral("%1  ·  %2  ·  %3\n%4")
+                          .arg(app.title, kind,
+                               app.enabled ? QStringLiteral("已启用") : QStringLiteral("已停用"),
+                               app.targetPath));
         QString scope=QStringLiteral("主面板");
         for (const auto& group:hotaruCfg.groups) if (group.id==app.groupId) scope=QStringLiteral("分组：")+group.title;
         const int rows=app.groupId.isEmpty()?hotaruCfg.gridRows:3;
@@ -632,7 +1175,32 @@ void ConfigPage::onSave()
 
     // 快捷键
     const QString oldHk = cfg.value("general/hotkey", "Alt+Space").toString();
-    const QString newHk = m_hotkey->keySequence().toString();
+    const QString newHk = m_hotkey->hotkeyText();
+    if (newHk.isEmpty()) {
+        QMessageBox::warning(this, QStringLiteral("快捷键无效"),
+                             QStringLiteral("请输入一个修饰键和主键，或录入双击 Ctrl。"));
+        return;
+    }
+    if (!m_hotkey->isDoubleCtrl()) {
+        UINT mods = 0, vk = 0;
+        if (!configKeySequenceToHotkey(m_hotkey->keySequence(), &mods, &vk)) {
+            QMessageBox::warning(this, QStringLiteral("快捷键格式无效"),
+                                 QStringLiteral("请输入修饰键加主键，例如 Alt+Space、Ctrl+K 或 Ctrl+Alt+K。"));
+            return;
+        }
+        QSettings probeCfg(Utils::dataDir() + "/config.ini", QSettings::IniFormat);
+        const QString current = probeCfg.value("general/hotkey", "Alt+Space").toString();
+        const bool sameAsCurrent = current.compare(newHk, Qt::CaseInsensitive) == 0;
+        const int probeId = 0x6f41;
+        const bool registered = RegisterHotKey(nullptr, probeId, mods | MOD_NOREPEAT, vk);
+        if (registered) UnregisterHotKey(nullptr, probeId);
+        if (!registered && !sameAsCurrent) {
+            QMessageBox::warning(this, QStringLiteral("快捷键已被占用"),
+                                 QStringLiteral("系统拒绝注册这个组合，可能已被其他程序占用。请更换后再保存。"));
+            updateHotkeyStatus();
+            return;
+        }
+    }
     cfg.setValue("general/hotkey", newHk);
     cfg.setValue("install/path", m_installPath->text().trimmed());
     cfg.setValue("net/proxy", m_proxy->text().trimmed());
@@ -743,16 +1311,12 @@ void ConfigPage::onSave()
 
 void ConfigPage::addPinnedApp()
 {
-    const QString path = QFileDialog::getOpenFileName(
-        this, QStringLiteral("选择固定软件或脚本"), QDir::rootPath(),
-        QStringLiteral("程序和脚本 (*.exe *.lnk *.bat *.cmd);;所有文件 (*.*)"));
+    const QString path = choosePinnedTarget(this);
     if (path.isEmpty())
         return;
-    const QString ext = QFileInfo(path).suffix().toLower();
-    if (ext != QLatin1String("exe") && ext != QLatin1String("lnk")
-        && ext != QLatin1String("bat") && ext != QLatin1String("cmd")) {
+    if (!PinnedApps::supportsTarget(path)) {
         QMessageBox::warning(this, QStringLiteral("不支持的启动目标"),
-                             QStringLiteral("固定软件只支持 exe、lnk、bat 和 cmd 文件。"));
+                             QStringLiteral("请提供 exe、lnk、bat、cmd 文件或真实磁盘文件夹。"));
         return;
     }
     QString error;
@@ -802,6 +1366,116 @@ void ConfigPage::editPinnedApp()
 {
     auto* item=m_pinnedApps->currentItem();if (!item) return;
     if (PinnedApps::editProperties(item->data(Qt::UserRole).toString(),this)) load();
+}
+
+void ConfigPage::openHotkeyCapture()
+{
+    auto* editor = new HotkeyCaptureEdit;
+    HotkeyCaptureDialog captureDialog(editor, this);
+    editor->setParent(&captureDialog);
+    QDialog* dialog = &captureDialog;
+    captureDialog.setObjectName(QStringLiteral("hotkeyCaptureDialog"));
+    captureDialog.setWindowTitle(QStringLiteral("录入呼出快捷键"));
+    captureDialog.setMinimumWidth(480);
+    Theme::bind(&captureDialog, "QDialog#hotkeyCaptureDialog{background:@window;} QLabel#hotkeyTitle{color:@text;font-size:17pt;font-weight:600;} QLabel#hotkeyHint,QLabel#hotkeyWaiting{color:@muted;} QLineEdit#hotkeyEditor{background:@field;border:1px solid @border;border-radius:8px;padding:9px 12px;font-size:13pt;color:@text;} QLineEdit#hotkeyEditor:focus{border:1px solid @accent;} QPushButton#hotkeyPrimary{background:#3b82f6;color:#fff;border:1px solid #3b82f6;border-radius:8px;padding:7px 18px;font-weight:600;} QPushButton#hotkeySecondary{background:@button;color:@text;border:1px solid @border;border-radius:8px;padding:7px 18px;}");
+    auto* lay = new QVBoxLayout(dialog);
+    lay->setContentsMargins(24, 22, 24, 20);
+    lay->setSpacing(12);
+    auto* title = new QLabel(QStringLiteral("录入呼出快捷键"), dialog);
+    title->setObjectName(QStringLiteral("hotkeyTitle"));
+    lay->addWidget(title);
+    auto* hint = new QLabel(QStringLiteral("点击输入框后按下组合键。支持 Alt+Space、Ctrl+K、Ctrl+Alt+K，也支持连续按两次 Ctrl。"), dialog);
+    hint->setObjectName(QStringLiteral("hotkeyHint"));
+    hint->setWordWrap(true);
+    lay->addWidget(hint);
+
+    editor->setObjectName(QStringLiteral("hotkeyEditor"));
+    editor->setMinimumHeight(48);
+    // 二级弹窗每次都从“等待输入”开始，避免用户必须先手动清除旧组合。
+    editor->clearHotkey();
+    lay->addWidget(editor);
+    auto* waiting = new QLabel(QStringLiteral("等待输入…"), dialog);
+    waiting->setObjectName(QStringLiteral("hotkeyWaiting"));
+    lay->addWidget(waiting);
+
+    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, dialog);
+    auto* ok = buttons->button(QDialogButtonBox::Ok);
+    auto* cancel = buttons->button(QDialogButtonBox::Cancel);
+    ok->setText(QStringLiteral("使用此快捷键"));
+    cancel->setText(QStringLiteral("取消"));
+    ok->setObjectName(QStringLiteral("hotkeyPrimary"));
+    cancel->setObjectName(QStringLiteral("hotkeySecondary"));
+    lay->addWidget(buttons);
+
+    auto refresh = [editor, waiting, ok] {
+        if (editor->isDoubleCtrl()) {
+            waiting->setText(QStringLiteral("已识别：双击 Ctrl"));
+            ok->setEnabled(true);
+        } else if (editor->keySequence().isEmpty()) {
+            waiting->setText(QStringLiteral("等待输入…"));
+            ok->setEnabled(false);
+        } else {
+            waiting->setText(QStringLiteral("已识别：%1").arg(editor->hotkeyText()));
+            ok->setEnabled(true);
+        }
+    };
+    editor->changed = refresh;
+    QObject::connect(buttons, &QDialogButtonBox::accepted, dialog, [dialog, ok] {
+        if (ok->isEnabled()) dialog->accept();
+    });
+    QObject::connect(buttons, &QDialogButtonBox::rejected, dialog, &QDialog::reject);
+    refresh();
+    emit hotkeyCaptureActive(true);
+    HotkeyCaptureNativeFilter nativeFilter(editor);
+    QCoreApplication::instance()->installNativeEventFilter(&nativeFilter);
+    QTimer::singleShot(0, &captureDialog, [editor] {
+        editor->setFocus(Qt::OtherFocusReason);
+        editor->selectAll();
+    });
+    const int result = dialog->exec();
+    QCoreApplication::instance()->removeNativeEventFilter(&nativeFilter);
+    emit hotkeyCaptureActive(false);
+    if (result != QDialog::Accepted)
+        return;
+    if (editor->isDoubleCtrl())
+        m_hotkey->setDoubleCtrl();
+    else
+        m_hotkey->setHotkeyText(editor->hotkeyText());
+    m_hotkeyButton->setText(m_hotkey->isDoubleCtrl()
+                                ? QStringLiteral("双击 Ctrl（点击修改）")
+                                : m_hotkey->hotkeyText());
+    updateHotkeyStatus();
+}
+
+void ConfigPage::updateHotkeyStatus()
+{
+    if (!m_hotkeyStatus) return;
+    if (m_hotkey && m_hotkey->isDoubleCtrl()) {
+        m_hotkeyStatus->setText(QStringLiteral("快捷键可用：双击 Ctrl"));
+        return;
+    }
+    const QKeySequence seq = m_hotkey ? m_hotkey->keySequence() : QKeySequence();
+    UINT mods = 0, vk = 0;
+    if (!configKeySequenceToHotkey(seq, &mods, &vk)) {
+        m_hotkeyStatus->setText(seq.isEmpty() ? QStringLiteral("请输入快捷键")
+                                               : QStringLiteral("格式无效：需要修饰键和主键"));
+        return;
+    }
+    QSettings probeCfg(Utils::dataDir() + "/config.ini", QSettings::IniFormat);
+    const QString current = probeCfg.value("general/hotkey", "Alt+Space").toString();
+    const QString text = seq.toString();
+    if (current.compare(text, Qt::CaseInsensitive) == 0) {
+        m_hotkeyStatus->setText(QStringLiteral("快捷键可用"));
+        return;
+    }
+    const int probeId = 0x6f42;
+    const bool registered = RegisterHotKey(nullptr, probeId, mods | MOD_NOREPEAT, vk);
+    if (registered) {
+        UnregisterHotKey(nullptr, probeId);
+        m_hotkeyStatus->setText(QStringLiteral("快捷键可用"));
+    } else {
+        m_hotkeyStatus->setText(QStringLiteral("快捷键已被占用"));
+    }
 }
 
 void ConfigPage::importThemePackage()

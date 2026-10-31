@@ -19,6 +19,11 @@
 #include <QFileDialog>
 #include <QWindow>
 #include <QInputDialog>
+#include <QDialog>
+#include <QDialogButtonBox>
+#include <QFormLayout>
+#include <QLineEdit>
+#include <QPushButton>
 #include <QContextMenuEvent>
 #include <QSignalBlocker>
 #include "Pinyin.h"
@@ -59,6 +64,7 @@
 #include <QSettings>
 #include <QScrollBar>
 #include <QScrollArea>
+#include <QStyle>
 #include <QStyledItemDelegate>
 #include <QTimer>
 #include <QToolButton>
@@ -382,7 +388,11 @@ void SearchWindow::buildUi()
     m_grid = new LauncherGrid(this);
     m_grid->installEventFilter(this);
     m_homePage = m_grid;
-    connect(m_grid,&LauncherGrid::addRequested,this,[this](int row,int column,bool folder) { addPinnedTarget({},row,column,folder); });
+    connect(m_grid,&LauncherGrid::addRequested,this,[this](int row,int column,bool folder) {
+        addPinnedFileOrFolder({},row,column,folder);
+    });
+    connect(m_grid,&LauncherGrid::createGroupRequested,this,
+            &SearchWindow::createPanelGroup);
     connect(m_grid,&LauncherGrid::itemMenuRequested,this,&SearchWindow::pinnedMenu);
     wireGrid(m_grid);
     m_homeScroll = new QScrollArea(this);
@@ -558,6 +568,7 @@ void SearchWindow::openSettings()
         dlg->setAttribute(Qt::WA_DeleteOnClose);
         connect(dlg,&SettingsDialog::rescanRequested,this,&SearchWindow::rescan);
         connect(dlg,&SettingsDialog::hotkeyChanged,this,&SearchWindow::hotkeyChanged);
+        connect(dlg,&SettingsDialog::hotkeyCaptureActive,this,&SearchWindow::hotkeyCaptureActive);
         connect(dlg,&QObject::destroyed,this,[this] {m_settingsOpen=false;refreshLauncher();});
         dlg->openAt(2,1);
         Utils::log(QStringLiteral("settings: 已创建并加载配置页"));
@@ -838,10 +849,10 @@ void SearchWindow::resizeEvent(QResizeEvent* event)
     layoutLauncher();
 }
 
-void SearchWindow::addPinnedTarget(const QString& id,int row,int column,bool folder)
+void SearchWindow::addPinnedFileOrFolder(const QString& id,int row,int column,bool folder)
 {
     if (!id.isEmpty()) for (const auto& app:PinnedApps::load()) if (app.id==id) folder=PinnedApps::targetType(app)=="folder";
-    const QString path=folder?QFileDialog::getExistingDirectory(this,QStringLiteral("选择文件夹"))
+    const QString path=folder?QFileDialog::getExistingDirectory(this,QStringLiteral("选择磁盘文件夹"))
         :QFileDialog::getOpenFileName(this,QStringLiteral("选择程序或脚本"),{},QStringLiteral("程序与脚本 (*.exe *.lnk *.bat *.cmd)"));
     if (path.isEmpty()) return;
     QString error;
@@ -856,6 +867,39 @@ void SearchWindow::addPinnedTarget(const QString& id,int row,int column,bool fol
         if (!PinnedApps::saveConfig(cfg,&error)) QMessageBox::warning(this,QStringLiteral("保存失败"),error);
     }
     runSearch();
+}
+
+void SearchWindow::createPanelGroup(int row, int column)
+{
+    if (m_groupPanel && m_groupPanel->isVisible())
+        return;
+    QString title;
+    if (!promptRename(QStringLiteral("新建文件夹"), true, &title))
+        return;
+    QString error;
+    if (!PinnedApps::createGroup(title, row, column, &error)) {
+        QMessageBox::warning(this, QStringLiteral("无法新建面板文件夹"), error);
+        return;
+    }
+    refreshLauncher();
+}
+
+void SearchWindow::addToGroup(int row, int column, bool folder)
+{
+    if (m_openGroup.isEmpty())
+        return;
+    const QString path = folder
+        ? QFileDialog::getExistingDirectory(this, QStringLiteral("选择磁盘文件夹"))
+        : QFileDialog::getOpenFileName(this, QStringLiteral("选择程序或脚本"), {},
+                                       QStringLiteral("程序与脚本 (*.exe *.lnk *.bat *.cmd)"));
+    if (path.isEmpty())
+        return;
+    auto item = PinnedApps::fromTarget(path);
+    item.groupId = m_openGroup;
+    QString error;
+    if (!PinnedApps::add(item, row, column, &error))
+        QMessageBox::warning(this, QStringLiteral("无法固定"), error);
+    refreshLauncher();
 }
 
 void SearchWindow::wireGrid(LauncherGrid* grid)
@@ -921,15 +965,64 @@ void SearchWindow::applyGridDrop(LauncherGrid* grid,const QString& id,int row,in
 
 void SearchWindow::renamePinned(const QString& id)
 {
+    renamePinnedInteractive(id);
+}
+
+bool SearchWindow::renamePinnedInteractive(const QString& id)
+{
     const auto cfg=PinnedApps::config();QString title;
+    bool isGroup=false;
     for (const auto& a:cfg.pinnedApps) if (a.id==id) title=a.title;
-    for (const auto& g:cfg.groups) if (g.id==id) title=g.title;
-    bool accepted=false;
-    const auto name=QInputDialog::getText(this,QStringLiteral("重命名显示名称"),QStringLiteral("仅修改面板中的显示名称，不修改源文件："),QLineEdit::Normal,title,&accepted);
-    if (!accepted) return;
+    for (const auto& g:cfg.groups) if (g.id==id) { title=g.title; isGroup=true; }
+    QString name;
+    if (!promptRename(title, isGroup, &name))
+        return false;
     QString error;
-    if (!PinnedApps::rename(id,name,&error)) QMessageBox::warning(this,QStringLiteral("重命名失败"),error);
+    if (!PinnedApps::rename(id,name,&error)) {
+        QMessageBox::warning(this,QStringLiteral("重命名失败"),error);
+        return false;
+    }
     refreshLauncher();
+    return true;
+}
+
+bool SearchWindow::promptRename(const QString& initial, bool isGroup, QString* result)
+{
+    if (!result)
+        return false;
+    QDialog dialog(this);
+    dialog.setWindowTitle(isGroup ? QStringLiteral("重命名面板文件夹") : QStringLiteral("重命名固定项"));
+    dialog.setMinimumWidth(500);
+    dialog.setObjectName(QStringLiteral("renameDialog"));
+    Theme::bind(&dialog, "QDialog#renameDialog{background:@window;} QLabel#renameTitle{color:@text;font-size:17pt;font-weight:600;} QLabel#renameHint,QLabel#renameError{color:@muted;} QLineEdit#renameEdit{background:@edit;background-color:@edit;border:1px solid @line;border-radius:8px;padding:8px 10px;font-size:12pt;color:@editText;} QLineEdit#renameEdit:focus{border:1px solid @accent;}");
+    auto* layout=new QVBoxLayout(&dialog);
+    layout->setContentsMargins(22,20,22,18);
+    auto* heading=new QLabel(isGroup ? QStringLiteral("重命名面板文件夹") : QStringLiteral("重命名固定项"),&dialog);
+    heading->setObjectName(QStringLiteral("renameTitle"));
+    layout->addWidget(heading);
+    auto* hint=new QLabel(QStringLiteral("只修改面板显示名，不修改源文件或磁盘目录。"),&dialog);
+    hint->setObjectName(QStringLiteral("renameHint"));hint->setWordWrap(true);layout->addWidget(hint);
+    auto* edit=new QLineEdit(initial,&dialog);edit->setObjectName(QStringLiteral("renameEdit"));edit->setMinimumHeight(44);edit->selectAll();layout->addWidget(edit);
+    auto* errorHint=new QLabel(&dialog);errorHint->setObjectName(QStringLiteral("renameError"));layout->addWidget(errorHint);
+    auto* buttons=new QDialogButtonBox(QDialogButtonBox::Ok|QDialogButtonBox::Cancel,&dialog);layout->addWidget(buttons);
+    auto* ok=buttons->button(QDialogButtonBox::Ok);
+    ok->setObjectName(QStringLiteral("primary"));
+    ok->setText(QStringLiteral("确定"));
+    auto* cancelButton = buttons->button(QDialogButtonBox::Cancel);
+    cancelButton->setObjectName(QStringLiteral("secondary"));
+    cancelButton->setText(QStringLiteral("取消"));
+    ok->setMinimumWidth(88); cancelButton->setMinimumWidth(88);
+    ok->setStyleSheet(QStringLiteral("QPushButton#primary{background:#3b82f6;color:#ffffff;border:1px solid #3b82f6;border-radius:7px;padding:6px 18px;font-weight:600;}QPushButton#primary:hover{background:#60a5fa;}QPushButton#primary:disabled{background:#64748b;color:#dbeafe;border:1px solid #64748b;}"));
+    cancelButton->setStyleSheet(QStringLiteral("QPushButton#secondary{background:#334155;color:#e2e8f0;border:1px solid #64748b;border-radius:7px;padding:6px 18px;}QPushButton#secondary:hover{background:#475569;}"));
+    auto validate=[edit,errorHint,ok]{const bool good=!edit->text().trimmed().isEmpty();ok->setEnabled(good);errorHint->setText(good?QString():QStringLiteral("名称不能为空。"));};
+    connect(edit,&QLineEdit::textChanged,&dialog,validate);
+    connect(edit,&QLineEdit::returnPressed,&dialog,[&dialog,ok]{if(ok->isEnabled()) dialog.accept();});
+    connect(buttons,&QDialogButtonBox::accepted,&dialog,[&dialog,ok]{if(ok->isEnabled()) dialog.accept();});
+    connect(buttons,&QDialogButtonBox::rejected,&dialog,&QDialog::reject);
+    validate();
+    if (dialog.exec()!=QDialog::Accepted) return false;
+    *result = edit->text().trimmed();
+    return true;
 }
 
 void SearchWindow::deleteCurrentPage()
@@ -987,14 +1080,8 @@ void SearchWindow::openGroup(const QString& id,int page)
                 return;
             }
         });
-        connect(m_groupGrid,&LauncherGrid::addRequested,this,[this](int row,int col,bool folder) {
-            const auto path=folder?QFileDialog::getExistingDirectory(this,QStringLiteral("选择文件夹")):
-                QFileDialog::getOpenFileName(this,QStringLiteral("选择程序或脚本"),{},QStringLiteral("程序与脚本 (*.exe *.lnk *.bat *.cmd)"));
-            if (path.isEmpty()) return;
-            auto item=PinnedApps::fromTarget(path);item.groupId=m_openGroup;QString error;
-            if (!PinnedApps::add(item,row,col,&error)) QMessageBox::warning(this,QStringLiteral("无法固定"),error);
-            refreshLauncher();
-        });
+        connect(m_groupGrid, &LauncherGrid::addRequested, this,
+                [this](int row, int col, bool folder) { addToGroup(row, col, folder); });
         auto* pages=new PageBar(panel);pages->setFixedSize(144,24);layout->addWidget(pages,0,Qt::AlignHCenter);
         pages->request=[this](int page,bool extra){m_groupGrid->setPage(page,extra);};
         connect(m_groupGrid,&LauncherGrid::pageChanged,pages,[pages](int page,int count){pages->page=page;pages->count=count;pages->update();});
@@ -1041,7 +1128,7 @@ void SearchWindow::pinnedMenu(const QString& id,const QPoint& globalPos)
     menu.addSeparator();
     menu.addAction(QStringLiteral("重命名…"),this,[this,id]{renamePinned(id);});
     menu.addAction(QStringLiteral("属性…"),this,[this,id]{if (PinnedApps::editProperties(id,this)) runSearch();});
-    if (!PinnedApps::targetExists(app)) menu.addAction(QStringLiteral("重新定位…"),this,[this,id]{addPinnedTarget(id);});
+    if (!PinnedApps::targetExists(app)) menu.addAction(QStringLiteral("重新定位…"),this,[this,id]{addPinnedFileOrFolder(id);});
     menu.addAction(QStringLiteral("移除"),this,[this,id] {
         QString error;if (!PinnedApps::remove(id,&error)) QMessageBox::warning(this,QStringLiteral("移除失败"),error);
         runSearch();
@@ -1629,7 +1716,6 @@ void SearchWindow::runSearch()
     // 网站那一节要用的东西先算出来：它得能在"工具直达"之前说话（见下面 webKeywordWins 那条）。
     const QVector<WebEntry> webs = WebShortcuts::loadWebs();
     const QString webTok = low.section(' ', 0, 0);
-    const QString webArgs = q.mid(webTok.size()).trimmed();
     // 显式配在网站上的关键字，优先级高于"工具名的首字母拼音"：配的 `gg` 就是 Google，
     // 不该被「广告弹窗」（guang gao → 首字母 gg）用拼音抢走整页。工具那边还有 `ggp`、`广告` 两条路。
     bool webKeywordWins = false;
@@ -1760,21 +1846,42 @@ void SearchWindow::runSearch()
         toolLoose.clear();
     }
 
-    // 固定软件与插件使用同一套搜索结果模型：名称、分类和目标路径均可匹配。
-    // 固定项始终参与搜索，不再受已移除的首页显示选项影响。
+    // 固定软件与面板文件夹使用同一节搜索结果，但保留不同 kind：名称、分类和目标路径均可匹配。
+    // 真实磁盘目录可以定位/固定，面板文件夹只能打开和管理分组；固定项始终参与搜索。
     {
-        QVector<PinnedApp> matches;
+        struct PinnedMatch { int score = 99; PinnedApp app; };
+        QVector<PinnedMatch> matches;
         for (const PinnedApp& app : PinnedApps::load()) {
             if (!app.enabled)
                 continue;
-            const QString haystack = app.title + QLatin1Char(' ')
-                + app.category + QLatin1Char(' ') + app.targetPath;
-            if (haystack.contains(low, Qt::CaseInsensitive))
-                matches.append(app);
+            const QString title = app.title.toLower();
+            const QString category = app.category.toLower();
+            const QString path = app.targetPath.toLower();
+            int score = -1;
+            if (title.startsWith(low))
+                score = 0;
+            else if (title.contains(low))
+                score = 1;
+            else if (category.contains(low))
+                score = 2;
+            else if (QFileInfo(path).fileName().contains(low))
+                score = 3;
+            else if (path.contains(low))
+                score = 4;
+            if (score >= 0)
+                matches.append({score, app});
         }
+        std::sort(matches.begin(), matches.end(), [](const PinnedMatch& a, const PinnedMatch& b) {
+            if (a.score != b.score)
+                return a.score < b.score;
+            return a.app.title.toLower() < b.app.title.toLower();
+        });
+        bool addedPinnedSection = false;
         if (!matches.isEmpty()) {
-            addSection(QStringLiteral("── 固定软件 ──"));
-            for (const PinnedApp& app : matches) {
+            addSection(QStringLiteral("── 固定项 ──"));
+            addedPinnedSection = true;
+            for (const PinnedMatch& match : matches) {
+                const PinnedApp& app = match.app;
                 SearchResult r;
                 r.kind = SearchResult::PinnedApp;
                 r.title = app.title;
@@ -1787,6 +1894,21 @@ void SearchWindow::runSearch()
                     r.icon = letterIcon(app.title, QColor(30, 150, 220));
                 addItem(r);
             }
+        }
+        for (const auto& group : PinnedApps::config().groups) {
+            if (!group.title.contains(low, Qt::CaseInsensitive))
+                continue;
+            if (!addedPinnedSection) {
+                addSection(QStringLiteral("── 固定项 ──"));
+                addedPinnedSection = true;
+            }
+            SearchResult r;
+            r.kind = SearchResult::PinnedGroup;
+            r.title = group.title;
+            r.subtitle = QStringLiteral("面板文件夹 · 固定面板");
+            r.target = group.id;
+            r.icon = QApplication::style()->standardIcon(QStyle::SP_DirIcon);
+            addItem(r);
         }
     }
 
@@ -1809,31 +1931,28 @@ void SearchWindow::runSearch()
         addItem(r);
     }
 
-    // 网站这一组排第二：关键字命中 / 网址直开 /（≥2 个字符）引擎兜底。
+    // 快捷搜索只取第一个完整词，后续内容不会拼接到目标地址或命令参数。
     // 兜底那条以前单独甩在整个列表最末尾，等于"网站"这一类排到了最后 —— 现在三条挨着放。
-    // webs / webTok / webArgs 在工具那一节之前就算好了。
+    // webs / webTok 在工具那一节之前就算好了。
     // 这一组**以前没有表头**：那几行直接跟在上一节的表头（搜 `b64` 时就是"工具"）底下，
-    // 看着像工具的结果。补一个"── 网站 ──"，顺带让"应用在前、网站在后"这条能被判据量到。
+    // 看着像工具的结果。补一个快捷搜索分组表头。
     const int webMark = m_results.size();
     for (const WebEntry& w : webs) {
         if (!w.keys.contains(webTok) && w.name.compare(webTok, Qt::CaseInsensitive) != 0)
             continue;
         SearchResult r;
-        r.kind = SearchResult::Web;
+        r.kind = SearchResult::QuickSearch;
         r.title = w.name;
-        r.subtitle = QString("打开官网 · %1").arg(w.url);
-        r.target = w.url;
-        r.icon = letterIcon(w.name, colorForKind(w.url));
+        const QString target = w.target.isEmpty() ? w.url : w.target;
+        const QString typeLabel = w.targetType == QLatin1String("folder") ? QStringLiteral("磁盘文件夹")
+            : w.targetType == QLatin1String("app") ? QStringLiteral("应用或脚本") : QStringLiteral("网页");
+        r.subtitle = QStringLiteral("快捷搜索 · %1 · %2").arg(typeLabel, target);
+        r.target = target;
+        r.extra = w.targetType;
+        r.icon = w.targetType == QLatin1String("folder") ? QApplication::style()->standardIcon(QStyle::SP_DirIcon)
+            : w.targetType == QLatin1String("app") ? Utils::cachedFileIcon(target) : letterIcon(w.name, colorForKind(target));
+        if (r.icon.isNull()) r.icon = letterIcon(w.name, colorForKind(target));
         addItem(r);
-        if (!webArgs.isEmpty() && !w.searchUrl.isEmpty()) {
-            SearchResult s;
-            s.kind = SearchResult::Web;
-            s.title = QString("在 %1 搜索 “%2”").arg(w.name, webArgs);
-            s.subtitle = w.searchUrl;
-            s.target = QString(w.searchUrl).replace("%s", QString::fromUtf8(QUrl::toPercentEncoding(webArgs)));
-            s.icon = letterIcon("搜", QColor(63, 106, 224));
-            addItem(s);
-        }
         break;
     }
     if (WebShortcuts::looksLikeUrl(q)) {
@@ -1860,7 +1979,7 @@ void SearchWindow::runSearch()
         h.kind = SearchResult::Info;
         h.actionable = false;
         h.isSection = true;
-        h.title = QStringLiteral("── 网站 ──");
+        h.title = QStringLiteral("── 快捷搜索 ──");
         m_results.insert(webMark, h);   // 表头补在这一组最前面（列表是 rebuildList() 时按 m_results 铺的）
     }
 
@@ -2040,6 +2159,9 @@ void SearchWindow::activateRow(int row)
     const SearchResult r = m_results[idx];
 
     switch (r.kind) {
+    case SearchResult::PinnedGroup:
+        openGroup(r.target);
+        break;
     case SearchResult::PinnedApp: {
         const auto apps = PinnedApps::load();
         auto it = std::find_if(apps.cbegin(), apps.cend(), [&r](const PinnedApp& app) {
@@ -2076,6 +2198,18 @@ void SearchWindow::activateRow(int row)
         saveUsage();
         hide();
         Platform::launch(r.target, {}, {}, true);
+        break;
+    }
+    case SearchResult::QuickSearch: {
+        bumpUsage(QStringLiteral("quick:") + r.title);
+        saveUsage();
+        hide();
+        if (r.extra == QLatin1String("app"))
+            Platform::launch(r.target, {}, {}, true);
+        else if (r.extra == QLatin1String("folder"))
+            Platform::reveal(r.target);
+        else
+            Platform::launch(WebShortcuts::normalizeUrl(r.target), {}, {}, true);
         break;
     }
     case SearchResult::Command: {
@@ -2509,7 +2643,10 @@ void SearchWindow::openContextMenu(const QPoint& globalPos)
     const int idx=hit->data(Qt::UserRole).toInt();
     if (idx<0 || idx>=m_results.size()) return;
     const SearchResult r=m_results[idx];
-    if (r.kind==SearchResult::PinnedApp) { pinnedMenu(r.target,globalPos);return; }
+    if (r.kind==SearchResult::PinnedApp || r.kind==SearchResult::PinnedGroup) {
+        pinnedMenu(r.target,globalPos);
+        return;
+    }
     m_menu = new QMenu(this);
     m_menu->setAttribute(Qt::WA_DeleteOnClose);
     m_menu->setStyleSheet(Utils::darkMenuStyle());
@@ -2518,6 +2655,27 @@ void SearchWindow::openContextMenu(const QPoint& globalPos)
         if (!isActiveWindow())
             hide();
     });
+
+    if (r.kind == SearchResult::QuickSearch) {
+        m_menu->addAction(QStringLiteral("打开目标"), this, [this, r] {
+            hide();
+            if (r.extra == QLatin1String("folder")) Platform::reveal(r.target);
+            else if (r.extra == QLatin1String("app")) Platform::launch(r.target, {}, {}, true);
+            else Platform::launch(WebShortcuts::normalizeUrl(r.target), {}, {}, true);
+        });
+        m_menu->addAction(QStringLiteral("编辑快捷搜索"), this, [this, r] {
+            openSettings();
+            if (auto* dlg = qobject_cast<SettingsDialog*>(m_settingsDlg.data()))
+                dlg->editQuickSearch(r.title);
+        });
+        m_menu->addAction(QStringLiteral("删除快捷搜索"), this, [this, r] {
+            auto entries = WebShortcuts::loadWebs();
+            for (int i = entries.size() - 1; i >= 0; --i)
+                if (entries[i].name == r.title) entries.removeAt(i);
+            WebShortcuts::saveWebs(entries);
+            runSearch();
+        });
+    }
 
     if (canPinResult(r)) {
         const bool exists=PinnedApps::isPinned(resultPinnedApp(r));

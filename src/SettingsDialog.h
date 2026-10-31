@@ -10,7 +10,7 @@ class QTimer;
 class ToolsPage;
 
 // ltool 配置页面（搜索框右侧齿轮打开）：左侧菜单 + 右侧内容
-//   网站 / 插件商店 / 配置 / 关于 —— 只有四行。
+//   快捷搜索 / 插件商店 / 配置 / 关于 —— 只有四行。
 //   语言在「配置」那一页里的一节；软件 / 下载器 / 定时任务是插件商店里的卡片，
 //   装了才出现、把 dll 改名 .off 就没了，和第三方插件同一条路。
 class LTOOL_CORE_API SettingsDialog : public QDialog {
@@ -24,12 +24,14 @@ public:
     // 直达某一页（tab 是那一张页里第几个选项卡 —— 软件那两张页搬进插件之后，
     // 它藏在「插件商店」那张卡里面，所以先展开卡再挑 tab；toolId 非空就展开那张卡）
     void openAt(int menuRow, int tab = -1, const QString& toolId = QString());
+    void editQuickSearch(const QString& name);
 
 signals:
     // 索引相关设置变化，需要触发一次重新扫描
     void rescanRequested();
     // 快捷键变更（序列字符串）
     void hotkeyChanged(const QString& sequence);
+    void hotkeyCaptureActive(bool active);
 
 private:
     void ensurePage(int index);

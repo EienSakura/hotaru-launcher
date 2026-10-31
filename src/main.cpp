@@ -81,6 +81,7 @@ int runHotaruSelftest(QApplication&, bool, const QString&);
 #include <QImage>
 #include <QKeySequence>
 #include <QMap>
+#include <QMetaObject>
 #include <QPainter>
 #include <QTimer>
 #include <QLocalServer>
@@ -159,6 +160,69 @@ private:
     std::function<void(WPARAM)> m_fn;
 };
 
+// Windows 的 RegisterHotKey 不支持“只按修饰键”。这里仅监听用户明确选择的双击 Ctrl，
+// 不吞掉原始按键，避免影响其他程序的快捷键。
+class CtrlDoubleTapHook {
+public:
+    ~CtrlDoubleTapHook() { uninstall(); }
+
+    bool install(std::function<void()> fn)
+    {
+        uninstall();
+        m_fn = std::move(fn);
+        s_instance = this;
+        m_hook = SetWindowsHookExW(WH_KEYBOARD_LL, &CtrlDoubleTapHook::callback,
+                                   GetModuleHandleW(nullptr), 0);
+        if (!m_hook) {
+            s_instance = nullptr;
+            m_fn = {};
+            return false;
+        }
+        return true;
+    }
+
+    void uninstall()
+    {
+        if (m_hook) {
+            UnhookWindowsHookEx(m_hook);
+            m_hook = nullptr;
+        }
+        if (s_instance == this)
+            s_instance = nullptr;
+        m_down = false;
+        m_lastUp = 0;
+        m_fn = {};
+    }
+
+private:
+    static LRESULT CALLBACK callback(int code, WPARAM message, LPARAM data)
+    {
+        if (code == HC_ACTION && s_instance && data) {
+            const auto* key = reinterpret_cast<const KBDLLHOOKSTRUCT*>(data);
+            const bool ctrl = key->vkCode == VK_LCONTROL || key->vkCode == VK_RCONTROL;
+            if (ctrl && (message == WM_KEYDOWN || message == WM_SYSKEYDOWN)) {
+                if (!s_instance->m_down) {
+                    if (s_instance->m_lastUp != 0
+                        && key->time - s_instance->m_lastUp <= 300
+                        && s_instance->m_fn)
+                        s_instance->m_fn();
+                    s_instance->m_down = true;
+                }
+            } else if (ctrl && (message == WM_KEYUP || message == WM_SYSKEYUP)) {
+                s_instance->m_down = false;
+                s_instance->m_lastUp = key->time;
+            }
+        }
+        return CallNextHookEx(s_instance ? s_instance->m_hook : nullptr, code, message, data);
+    }
+
+    inline static CtrlDoubleTapHook* s_instance = nullptr;
+    HHOOK m_hook = nullptr;
+    std::function<void()> m_fn;
+    bool m_down = false;
+    DWORD m_lastUp = 0;
+};
+
 // QKeySequence → RegisterHotKey 的 (修饰键, 虚拟键)
 bool keySeqToHotkey(const QKeySequence& ks, UINT* mods, UINT* vk)
 {
@@ -177,7 +241,23 @@ bool keySeqToHotkey(const QKeySequence& ks, UINT* mods, UINT* vk)
     else if (key >= Qt::Key_F1 && key <= Qt::Key_F24) k = UINT(VK_F1) + UINT(key - Qt::Key_F1);
     else if (key >= Qt::Key_A && key <= Qt::Key_Z) k = UINT('A') + UINT(key - Qt::Key_A);
     else if (key >= Qt::Key_0 && key <= Qt::Key_9) k = UINT('0') + UINT(key - Qt::Key_0);
-    else return false;
+    else {
+        switch (key) {
+        case Qt::Key_Tab: k = VK_TAB; break; case Qt::Key_Return: case Qt::Key_Enter: k = VK_RETURN; break;
+        case Qt::Key_Escape: k = VK_ESCAPE; break; case Qt::Key_Backspace: k = VK_BACK; break;
+        case Qt::Key_Delete: k = VK_DELETE; break; case Qt::Key_Insert: k = VK_INSERT; break;
+        case Qt::Key_Home: k = VK_HOME; break; case Qt::Key_End: k = VK_END; break;
+        case Qt::Key_Left: k = VK_LEFT; break; case Qt::Key_Right: k = VK_RIGHT; break;
+        case Qt::Key_Up: k = VK_UP; break; case Qt::Key_Down: k = VK_DOWN; break;
+        case Qt::Key_PageUp: k = VK_PRIOR; break; case Qt::Key_PageDown: k = VK_NEXT; break;
+        case Qt::Key_Comma: k = VK_OEM_COMMA; break; case Qt::Key_Period: k = VK_OEM_PERIOD; break;
+        case Qt::Key_Slash: k = VK_OEM_2; break; case Qt::Key_Backslash: k = VK_OEM_5; break;
+        case Qt::Key_Semicolon: k = VK_OEM_1; break; case Qt::Key_Apostrophe: k = VK_OEM_7; break;
+        case Qt::Key_BracketLeft: k = VK_OEM_4; break; case Qt::Key_BracketRight: k = VK_OEM_6; break;
+        case Qt::Key_Minus: k = VK_OEM_MINUS; break; case Qt::Key_Equal: k = VK_OEM_PLUS; break;
+        default: return false;
+        }
+    }
     if (!mm && !(key >= Qt::Key_F1 && key <= Qt::Key_F24))
         return false; // 必须带修饰键（F 键除外）
     *mods = mm;
@@ -686,6 +766,21 @@ int main(int argc, char* argv[])
         }
         return EXCEPTION_CONTINUE_SEARCH;
     });
+    // 便携版可能从文件管理器、旧快捷方式或其它工作目录启动；强制 Qt 使用
+    // 可执行文件旁的 platforms 目录，避免系统/开发环境残留 QT_PLUGIN_PATH
+    // 把 qwindows.dll 指到另一套 Qt，最终弹出“平台插件初始化失败”。
+#ifdef Q_OS_WIN
+    wchar_t modulePath[32768] = {};
+    const DWORD moduleLen = GetModuleFileNameW(nullptr, modulePath, DWORD(std::size(modulePath)));
+    if (moduleLen > 0 && moduleLen < std::size(modulePath)) {
+        const QString pluginDir = QFileInfo(QString::fromWCharArray(modulePath, int(moduleLen))).absolutePath()
+            + QStringLiteral("/platforms");
+        if (QDir(pluginDir).exists()) {
+            qputenv("QT_QPA_PLATFORM_PLUGIN_PATH", QDir::toNativeSeparators(pluginDir).toUtf8());
+            qunsetenv("QT_PLUGIN_PATH");
+        }
+    }
+#endif
     QApplication app(argc, argv);
     // 数据目录搬家：老 %APPDATA%\ltool → 软件目录下的 data\（他 2026-10-21 点名"不要放在 C 盘"）。
     // **只在"正常启动"那一次做**（命令行里没有任何 `--` 旗标）：否则我拿构建目录那份 exe 跑一条
@@ -1238,7 +1333,8 @@ int main(int argc, char* argv[])
         // 动作名 "record" 必须有人在门口挂着牌子。这条红了 = 按 F2 什么都没发生，
         // 而"按了没反应"是这程序里最难查的一个形状，所以它和上面那七条同权重。
         check("热键动作 record 有人接（谁）",
-              PluginHost::actionOwner(QStringLiteral("record")), QStringLiteral("record"));
+              PluginHost::actionOwner(QStringLiteral("record")),
+              PluginHost::isDisabled(QStringLiteral("record")) ? QString() : QStringLiteral("record"));
         // 录屏的判据也跟着进了插件：符号点名不到 = 那面旗会红（这里只 resolve，一次都不跑 ——
         // 那五条全都要真屏幕，跑起来就是十几秒外加往屏幕上贴窗口）。
         has("record 插件导出 --recq 的判据入口",
@@ -1247,7 +1343,8 @@ int main(int argc, char* argv[])
         // 热键还注册在这层薄壳里，动作名 "capture" 必须有人在门口挂牌。
         // 这条红了 = 按 F1 什么都没发生，而那正是这程序里最难查的一个形状。
         check("热键动作 capture 有人接（谁）",
-              PluginHost::actionOwner(QStringLiteral("capture")), QStringLiteral("capture"));
+              PluginHost::actionOwner(QStringLiteral("capture")),
+              PluginHost::isDisabled(QStringLiteral("capture")) ? QString() : QStringLiteral("capture"));
         // "按了没反应"那句提示本身也要说真话（2026-10-19 他按 F1 弹的是"是不是缺 ltool-capture.dll"，
         // 可 dll 明明在目录里 —— 是商店那份产物和这版 core 的导出面对不上，LoadLibrary 失败）。
         // 本机这批全都起得来，所以量的是**分支**：装了的不许说"是不是缺"，没装的才许说。
@@ -2679,6 +2776,15 @@ int main(int argc, char* argv[])
         };
         const int proxy = rowCount(QStringLiteral("下载代理："));
         say("「下载代理」只有一行", proxy == 1, QStringLiteral("数到 %1 行").arg(proxy));
+        const int installRoot = rowCount(QStringLiteral("第三方软件安装根目录："));
+        say("安装路径明确为第三方软件安装根目录", installRoot == 1,
+            QStringLiteral("数到 %1 行").arg(installRoot));
+        auto* hotkeyButton = page.findChild<QPushButton*>(QStringLiteral("hotkeyCaptureButton"));
+        auto* hotkeyMode = page.findChild<QComboBox*>(QStringLiteral("hotkeyMode"));
+        say("快捷键使用单一二级录入按钮",
+            hotkeyButton != nullptr && hotkeyMode == nullptr,
+            QStringLiteral("录入按钮=%1，旧模式框=%2")
+                .arg(hotkeyButton ? 1 : 0).arg(hotkeyMode ? 1 : 0));
         const int roots = rowCount(QStringLiteral("扫描根目录："));
         say("没生效过的「扫描根目录」已拿掉", roots == 0, QStringLiteral("数到 %1 行").arg(roots));
         const bool hasList = hasRow(QStringLiteral("项目列表："));
@@ -2824,8 +2930,8 @@ int main(int argc, char* argv[])
                 for (int i = 0; i < menu->count(); ++i)
                     names << menu->item(i)->text();
             }
-            say("菜单正好四行、顺序是 网站/插件商店/配置/关于",
-                names.join(QStringLiteral(" / ")) == QStringLiteral("网站 / 插件商店 / 配置 / 关于"),
+            say("菜单正好四行、顺序是 快捷搜索/插件商店/配置/关于",
+                names.join(QStringLiteral(" / ")) == QStringLiteral("快捷搜索 / 插件商店 / 配置 / 关于"),
                 names.join(QStringLiteral(" / ")));
             auto* stack = dlg.findChild<QStackedWidget*>();
             int built = 0;
@@ -2839,8 +2945,7 @@ int main(int argc, char* argv[])
             say("每一行点开都不是一块空面板", built == (menu ? menu->count() : 0),
                 QStringLiteral("有内容的 %1 / 共 %2 行").arg(built).arg(menu ? menu->count() : 0));
 
-            // 图标这一条盯两件事：「插件商店」那颗**不再是第一个字**，其余三行**还是**。
-            // 底块颜色从图标自己身上取（取出现得最多的那个不透明色 = 那块圆角色），
+            // 图标这一条确认四行都不再使用首字图标。底块颜色从图标自己身上取，
             // 这样和 Utils::letterIcon(名字, 同一块色) 比才是公道的比法 —— 不然换个色就永远不等。
             const auto imgOf = [](const QIcon& i) { return i.pixmap(48, 48).toImage(); };
             const auto tileColor = [](const QImage& im) {
@@ -2855,16 +2960,16 @@ int main(int argc, char* argv[])
                     if (it.value() > n) { n = it.value(); best = it.key(); }
                 return QColor(best);
             };
-            QStringList bagged, lettered;
+            QStringList vectorIcons, lettered;
             for (int i = 0; menu && i < menu->count(); ++i) {
                 const QImage im = imgOf(menu->item(i)->icon());
                 const QImage asLetter = imgOf(Utils::letterIcon(menu->item(i)->text(), tileColor(im)));
-                (im == asLetter ? lettered : bagged) << menu->item(i)->text();
+                (im == asLetter ? lettered : vectorIcons) << menu->item(i)->text();
             }
-            say("只有「插件商店」那颗换成了画出来的袋子",
-                bagged == QStringList { QStringLiteral("插件商店") },
-                QStringLiteral("换过的=%1 还是字的=%2").arg(bagged.join(QStringLiteral("、")),
-                                                           lettered.join(QStringLiteral("、"))));
+            say("设置侧栏四行都使用独立矢量图标",
+                vectorIcons.size() == (menu ? menu->count() : 0) && lettered.isEmpty(),
+                QStringLiteral("矢量=%1 文字=%2").arg(vectorIcons.join(QStringLiteral("、")),
+                                                       lettered.join(QStringLiteral("、"))));
             // 改外观的东西要能看见，不能只剩一条断言：四颗图标拼成一条，铺在菜单那块深色底上存成 PNG。
             // 数断言能证明"它不是第一个字"，证明不了"它看得出来是个袋子"。
             {
@@ -5434,6 +5539,11 @@ int main(int argc, char* argv[])
     // 那会盖在用户正做的事情上面（2026-10-15 右键那一路就是这么被他撞上的）。
     // who 空 = 根本没插件声明接这个动作；非空 = 它接了但没干成（那一份插件自己会说明为什么）。
     const auto routeHotkey = [&](const QString& keyLabel, const QString& action) {
+        if (PluginHost::actionOwner(action).isEmpty()) {
+            Utils::log(QStringLiteral("%1 ignored: action %2 has no enabled plugin")
+                           .arg(keyLabel, action));
+            return;
+        }
         QString who;
         if (PluginHost::invoke(action, {}, &who))
             return;
@@ -5464,16 +5574,18 @@ int main(int argc, char* argv[])
     UINT curMods = 0, curVk = 0;
     bool hotkeyOk = false;
     QString hotkeyLabel;
+    CtrlDoubleTapHook doubleCtrlHook;
 
     const auto unregisterCurrent = [&] {
         UnregisterHotKey(nullptr, (int)kHotkeyId);
+        doubleCtrlHook.uninstall();
     };
     const auto tryRegister = [&](UINT mods, UINT vk) {
         return RegisterHotKey(nullptr, (int)kHotkeyId, mods | MOD_NOREPEAT, vk);
     };
 
     QSettings cfg(Utils::dataDir() + "/config.ini", QSettings::IniFormat);
-    const QString preferred = cfg.value("general/hotkey", "Alt+Space").toString();
+    QString preferred = cfg.value("general/hotkey", "Alt+Space").toString();
     UINT prefMods = MOD_ALT, prefVk = VK_SPACE;
     keySeqToHotkey(QKeySequence(preferred), &prefMods, &prefVk);
 
@@ -5485,7 +5597,19 @@ int main(int argc, char* argv[])
     };
 
     UINT m2 = 0, v2 = 0;
-    if (keySeqToHotkey(QKeySequence(preferred), &m2, &v2)
+    bool preferredDoubleCtrl = preferred.compare(QStringLiteral("Ctrl+Ctrl"), Qt::CaseInsensitive) == 0;
+    SearchWindow* window = &win;
+    const auto toggleFromHook = [window] {
+        QMetaObject::invokeMethod(window, [window] { window->toggleVisible(); }, Qt::QueuedConnection);
+    };
+    if (preferredDoubleCtrl) {
+        hotkeyOk = doubleCtrlHook.install(toggleFromHook);
+        if (hotkeyOk) {
+            hotkeyLabel = QStringLiteral("Ctrl+Ctrl");
+            curMods = 0;
+            curVk = 0;
+        }
+    } else if (keySeqToHotkey(QKeySequence(preferred), &m2, &v2)
         && tryRegister(m2, v2)) {
         hotkeyOk = true;
         hotkeyLabel = preferred;
@@ -5531,17 +5655,79 @@ int main(int argc, char* argv[])
     auto applyHotkeyChange = [&](const QString& seq) {
         UINT nm = 0, nv = 0;
         unregisterCurrent();
-        if (!keySeqToHotkey(QKeySequence(seq), &nm, &nv)
-            || !tryRegister(nm, nv)) {
-            tryRegister(curMods, curVk); // 回退当前热键
+        const bool doubleCtrl = seq.compare(QStringLiteral("Ctrl+Ctrl"), Qt::CaseInsensitive) == 0;
+        const bool registered = doubleCtrl
+            ? doubleCtrlHook.install(toggleFromHook)
+            : (keySeqToHotkey(QKeySequence(seq), &nm, &nv) && tryRegister(nm, nv));
+        if (!registered) {
+            bool restored = false;
+            if (curVk != 0)
+                restored = tryRegister(curMods, curVk); // 回退当前标准热键
+            else if (hotkeyLabel.compare(QStringLiteral("Ctrl+Ctrl"), Qt::CaseInsensitive) == 0)
+                restored = doubleCtrlHook.install(toggleFromHook);
+            hotkeyOk = restored;
+            // 设置页已经写入候选值；真实注册失败时立即回写原首选值，避免重启后加载不可用组合。
+            QSettings rollbackCfg(Utils::dataDir() + "/config.ini", QSettings::IniFormat);
+            rollbackCfg.setValue("general/hotkey", preferred);
+            rollbackCfg.sync();
+            if (!restored) {
+                curMods = curVk = 0;
+                hotkeyLabel.clear();
+                win.setHotkeyLabel({});
+            }
+            updateMenuHotkey();
             Utils::log(QString("hotkey change to %1 FAILED, keep %2").arg(seq, hotkeyLabel));
             return;
         }
-        curMods = nm;
-        curVk = nv;
+        hotkeyOk = true;
+        curMods = doubleCtrl ? 0 : nm;
+        curVk = doubleCtrl ? 0 : nv;
         hotkeyLabel = seq;
+        preferred = seq;
+        preferredDoubleCtrl = doubleCtrl;
         win.setHotkeyLabel(seq);
+        updateMenuHotkey();
         Utils::log(QString("hotkey changed to %1").arg(seq));
+    };
+
+    // 快捷键设置的二级录入弹窗需要收到原始按键。录入期间释放全局注册，
+    // 关闭弹窗后立即恢复原组合；真正保存新组合仍由 applyHotkeyChange 负责。
+    bool hotkeyCapturePaused = false;
+    UINT pausedMods = 0, pausedVk = 0;
+    QString pausedLabel;
+    bool pausedDoubleCtrl = false;
+    const auto setHotkeyCapturePaused = [&](bool active) {
+        if (active) {
+            if (hotkeyCapturePaused)
+                return;
+            pausedMods = curMods;
+            pausedVk = curVk;
+            pausedLabel = hotkeyLabel;
+            pausedDoubleCtrl = pausedLabel.compare(QStringLiteral("Ctrl+Ctrl"), Qt::CaseInsensitive) == 0;
+            unregisterCurrent();
+            hotkeyCapturePaused = true;
+            return;
+        }
+        if (!hotkeyCapturePaused)
+            return;
+        bool restored = false;
+        if (pausedDoubleCtrl)
+            restored = doubleCtrlHook.install(toggleFromHook);
+        else if (pausedVk != 0)
+            restored = tryRegister(pausedMods, pausedVk);
+        hotkeyCapturePaused = false;
+        if (restored) {
+            curMods = pausedMods;
+            curVk = pausedVk;
+            hotkeyLabel = pausedLabel;
+            hotkeyOk = true;
+            win.setHotkeyLabel(hotkeyLabel);
+        } else {
+            hotkeyOk = false;
+            hotkeyLabel.clear();
+            win.setHotkeyLabel({});
+            Utils::log(QStringLiteral("hotkey capture close: restore failed"));
+        }
     };
 
     // 每 30 秒尝试夺回首选热键（热键不可用窗口约 1ms）
@@ -5550,7 +5736,10 @@ int main(int argc, char* argv[])
             return;
         unregisterCurrent();
         UINT pm = 0, pv = 0;
-        if (keySeqToHotkey(QKeySequence(preferred), &pm, &pv) && tryRegister(pm, pv)) {
+        const bool reclaimed = preferredDoubleCtrl
+            ? doubleCtrlHook.install(toggleFromHook)
+            : (keySeqToHotkey(QKeySequence(preferred), &pm, &pv) && tryRegister(pm, pv));
+        if (reclaimed) {
             curMods = pm;
             curVk = pv;
             hotkeyLabel = preferred;
@@ -5558,7 +5747,8 @@ int main(int argc, char* argv[])
             Utils::log(QString("hotkey reclaimed: %1").arg(preferred));
             notifyHotkey(preferred);
         } else {
-            tryRegister(curMods, curVk); // 重新挂上当前降级组合
+            if (curVk != 0)
+                tryRegister(curMods, curVk); // 重新挂上当前降级组合
         }
     };
     auto* reclaimTimer = new QTimer(&app);
@@ -5651,12 +5841,32 @@ int main(int argc, char* argv[])
         QTimer::singleShot(1500, &win, [&] { notifyHotkey(hotkeyLabel); });
     }
 
-    // F1 截图热键（独立注册，失败仅记录）
-    if (!RegisterHotKey(nullptr, (int)kCaptureId, MOD_NOREPEAT, VK_F1))
-        Utils::log(QString("F1 capture hotkey failed (err %1)").arg(GetLastError()));
-    // F2 录屏（只录选中的那一个窗口）。失败只记日志：F2 被别的程序占了也不该拖住启动
-    if (!RegisterHotKey(nullptr, (int)kRecordId, MOD_NOREPEAT, VK_F2))
-        Utils::log(QString("F2 record hotkey failed (err %1)").arg(GetLastError()));
+    // F1/F2 只在对应插件启用且声明动作时注册。插件改名为 .off 后，
+    // 主程序不再留下“按键还会弹提示”的空热键。
+    const auto registerPluginHotkey = [](WPARAM id, const QString& action,
+                                         const QString& label, UINT vk) {
+        const QString owner = PluginHost::actionOwner(action);
+        if (owner.isEmpty()) {
+            Utils::log(QStringLiteral("%1 hotkey skipped: action %2 has no enabled plugin")
+                           .arg(label, action));
+            return;
+        }
+        if (!RegisterHotKey(nullptr, (int)id, MOD_NOREPEAT, vk))
+            Utils::log(QStringLiteral("%1 hotkey failed (err %2)").arg(label).arg(GetLastError()));
+        else
+            Utils::log(QStringLiteral("%1 hotkey registered by plugin %2").arg(label, owner));
+    };
+    registerPluginHotkey(kCaptureId, QStringLiteral("capture"), QStringLiteral("F1 capture"), VK_F1);
+    registerPluginHotkey(kRecordId, QStringLiteral("record"), QStringLiteral("F2 record"), VK_F2);
+
+    // 托盘“退出”进入 aboutToQuit 时，先主动撤销热键、低级键盘钩子和单实例管道。
+    // Windows 进程结束本来也会回收它们，但显式清理能避免退出瞬间的旧实例残留。
+    QObject::connect(&app, &QCoreApplication::aboutToQuit, [&] {
+        unregisterCurrent();
+        UnregisterHotKey(nullptr, (int)kCaptureId);
+        UnregisterHotKey(nullptr, (int)kRecordId);
+        server.close();
+    });
 
     win.startInitialScan(); // 启动即后台扫描（增量优先）
     TaskScheduler::instance().start(); // 定时任务调度（每 30 秒检查）
@@ -6774,7 +6984,9 @@ int main(int argc, char* argv[])
         });
     }
 
-    QObject::connect(&win, &SearchWindow::hotkeyChanged, &win, applyHotkeyChange);    const int rc = app.exec();
+    QObject::connect(&win, &SearchWindow::hotkeyChanged, &win, applyHotkeyChange);
+    QObject::connect(&win, &SearchWindow::hotkeyCaptureActive, &win, setHotkeyCapturePaused);
+    const int rc = app.exec();
     if (args.contains("--toggle"))
         return toggleBad;
     if (args.contains("--capgeo"))

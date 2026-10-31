@@ -5,11 +5,12 @@
 class QListWidget;
 class QPushButton;
 
-// 配置 - 网站页：网站关键字列表（增加/编辑/删除，存 webs.json）
+// 配置 - 快捷搜索页：网页、应用和磁盘文件夹关键字规则（存 quick-search.json）
 class WebsitesPage : public QWidget {
     Q_OBJECT
 public:
     explicit WebsitesPage(QWidget* parent = nullptr);
+    void editEntryNamed(const QString& name);
 
     void editEntryAt(int index);
     void removeEntryAt(int index);
@@ -17,6 +18,7 @@ public:
 private:
     void rebuild();
     void addEntry();
+    void addEntryFromDrop(const QString& target, const QString& targetType);
 
     QListWidget* m_list = nullptr;
 };
