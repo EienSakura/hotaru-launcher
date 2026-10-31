@@ -105,7 +105,7 @@ DLL 工具插件与 ZIP 皮肤是两种独立扩展。默认构建不捆绑工�
 
 现有工具插件均来自上游 ltool，插件商店仍使用上游渠道；Hotaru 暂未进行兼容性测试，使用前需要自行适配和验证。主程序默认不附带插件；分发插件需要额外构建、验证和打包。
 
-“关于”页展示 Hotaru 版本与本机信息，提供 [本项目仓库](https://github.com/EienSakura/Hotaru) 和发布页入口，暂不启用应用内更新。Hotaru 从 `1.0.0` 开始独立计版。
+“关于”页展示 Hotaru 版本与本机信息，提供 [本项目仓库](https://github.com/EienSakura/hotaru-launcher) 和发布页入口，暂不启用应用内更新。Hotaru 从 `1.0.0` 开始独立计版。
 
 ## 配置与备份
 

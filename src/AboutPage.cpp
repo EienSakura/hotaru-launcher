@@ -42,7 +42,7 @@ namespace {
 
 // GitHub 上这个工程的地址。换仓库只改这两行。
 const char kRepoOwner[] = "EienSakura";
-const char kRepoName[] = "Hotaru";
+const char kRepoName[] = "hotaru-launcher";
 
 } // namespace
 

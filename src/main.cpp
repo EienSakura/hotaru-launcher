@@ -2235,12 +2235,12 @@ int main(int argc, char* argv[])
         // 检查更新不再碰 api.github.com（匿名 60 次/小时的额度会被同一出口 IP 上的一切
         // 脚本吃光，他这次看到的 403 就是这么来的）：这里钉的是"走网页那条 + 直链推得出来"。
         check("最新那条走的是网页地址（不是限流的 api）", AboutPage::releasesPageUrl(),
-              QStringLiteral("https://github.com/EienSakura/Hotaru/releases/latest"));
+              QStringLiteral("https://github.com/EienSakura/hotaru-launcher/releases/latest"));
         check("安装包直链按 tag + 版本号推得出来",
               AboutPage::downloadUrlFor(QStringLiteral("v1.2.3"), QStringLiteral("1.2.3")),
-              QStringLiteral("https://github.com/EienSakura/Hotaru/releases/download/v1.2.3/Hotaru-1.2.3-setup.exe"));
+              QStringLiteral("https://github.com/EienSakura/hotaru-launcher/releases/download/v1.2.3/Hotaru-1.2.3-setup.exe"));
         check("给人点的发布页", AboutPage::releasesPageUrl(),
-              QStringLiteral("https://github.com/EienSakura/Hotaru/releases/latest"));
+              QStringLiteral("https://github.com/EienSakura/hotaru-launcher/releases/latest"));
 
         // 版本比较：这一段最容易写错成字符串比（"10" < "9"）
         check("1.10 必须大于 1.9", QString::number(Utils::compareVersions("1.10", "1.9")), "1");
@@ -2370,7 +2370,7 @@ int main(int argc, char* argv[])
         has(("页面上显示的版本 == 编译期传进来的 " + ver).toUtf8().constData(), showsVersion);
 
         check("仓库入口指向 Hotaru", AboutPage::repositoryUrl(),
-              QStringLiteral("https://github.com/EienSakura/Hotaru"));
+              QStringLiteral("https://github.com/EienSakura/hotaru-launcher"));
         auto* repo = page.findChild<QPushButton*>(QStringLiteral("openRepository"));
         has("仓库按钮可用且布局包含它", repo && repo->isEnabled() && laidOut.contains(repo));
         for (const char* objName : {"checkUpdate", "downloadUpdate", "installUpdate"}) {
