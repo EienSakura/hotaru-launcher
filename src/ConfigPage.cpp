@@ -1035,7 +1035,7 @@ ConfigPage::ConfigPage(QWidget* parent)
     save->setDefault(true);
     save->setObjectName("primary");
     save->setMinimumWidth(92);
-    save->setStyleSheet(QStringLiteral("QPushButton#primary{background:#3b82f6;color:#ffffff;border:1px solid #3b82f6;border-radius:8px;padding:7px 18px;font-weight:600;}QPushButton#primary:hover{background:#60a5fa;}QPushButton#primary:pressed{background:#2563eb;}"));
+    save->setStyleSheet(QStringLiteral("QPushButton#primary{background:@accent;color:@onAccent;border:1px solid @accent;border-radius:8px;padding:7px 18px;font-weight:600;}QPushButton#primary:hover{background:@accentUp;}QPushButton#primary:pressed{background:@accentDown;}"));
     auto* btnLay = new QHBoxLayout;
     btnLay->setContentsMargins(12, 4, 12, 10);
     btnLay->setSpacing(10);
@@ -1377,7 +1377,7 @@ void ConfigPage::openHotkeyCapture()
     captureDialog.setObjectName(QStringLiteral("hotkeyCaptureDialog"));
     captureDialog.setWindowTitle(QStringLiteral("录入呼出快捷键"));
     captureDialog.setMinimumWidth(480);
-    Theme::bind(&captureDialog, "QDialog#hotkeyCaptureDialog{background:@window;} QLabel#hotkeyTitle{color:@text;font-size:17pt;font-weight:600;} QLabel#hotkeyHint,QLabel#hotkeyWaiting{color:@muted;} QLineEdit#hotkeyEditor{background:@field;border:1px solid @border;border-radius:8px;padding:9px 12px;font-size:13pt;color:@text;} QLineEdit#hotkeyEditor:focus{border:1px solid @accent;} QPushButton#hotkeyPrimary{background:#3b82f6;color:#fff;border:1px solid #3b82f6;border-radius:8px;padding:7px 18px;font-weight:600;} QPushButton#hotkeySecondary{background:@button;color:@text;border:1px solid @border;border-radius:8px;padding:7px 18px;}");
+    Theme::bind(&captureDialog, "QDialog#hotkeyCaptureDialog{background:@window;} QLabel#hotkeyTitle{color:@text;font-size:17pt;font-weight:600;} QLabel#hotkeyHint,QLabel#hotkeyWaiting{color:@muted;} QLineEdit#hotkeyEditor{background:@field;border:1px solid @border;border-radius:8px;padding:9px 12px;font-size:13pt;color:@text;} QLineEdit#hotkeyEditor:focus{border:1px solid @accent;} QPushButton#hotkeyPrimary{background:@accent;color:@onAccent;border:1px solid @accent;border-radius:8px;padding:7px 18px;font-weight:600;} QPushButton#hotkeyPrimary:hover{background:@accentUp;} QPushButton#hotkeyPrimary:pressed{background:@accentDown;} QPushButton#hotkeySecondary{background:@button;color:@text;border:1px solid @border;border-radius:8px;padding:7px 18px;}");
     auto* lay = new QVBoxLayout(dialog);
     lay->setContentsMargins(24, 22, 24, 20);
     lay->setSpacing(12);

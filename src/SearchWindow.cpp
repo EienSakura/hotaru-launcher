@@ -1012,8 +1012,8 @@ bool SearchWindow::promptRename(const QString& initial, bool isGroup, QString* r
     cancelButton->setObjectName(QStringLiteral("secondary"));
     cancelButton->setText(QStringLiteral("取消"));
     ok->setMinimumWidth(88); cancelButton->setMinimumWidth(88);
-    ok->setStyleSheet(QStringLiteral("QPushButton#primary{background:#3b82f6;color:#ffffff;border:1px solid #3b82f6;border-radius:7px;padding:6px 18px;font-weight:600;}QPushButton#primary:hover{background:#60a5fa;}QPushButton#primary:disabled{background:#64748b;color:#dbeafe;border:1px solid #64748b;}"));
-    cancelButton->setStyleSheet(QStringLiteral("QPushButton#secondary{background:#334155;color:#e2e8f0;border:1px solid #64748b;border-radius:7px;padding:6px 18px;}QPushButton#secondary:hover{background:#475569;}"));
+    ok->setStyleSheet(QStringLiteral("QPushButton#primary{background:@accent;color:@onAccent;border:1px solid @accent;border-radius:7px;padding:6px 18px;font-weight:600;}QPushButton#primary:hover{background:@accentUp;}QPushButton#primary:disabled{background:@disabled;color:@disabled;border:1px solid @disabledLine;}"));
+    cancelButton->setStyleSheet(QStringLiteral("QPushButton#secondary{background:@button;color:@text;border:1px solid @border;border-radius:7px;padding:6px 18px;}QPushButton#secondary:hover{background:@hover;}"));
     auto validate=[edit,errorHint,ok]{const bool good=!edit->text().trimmed().isEmpty();ok->setEnabled(good);errorHint->setText(good?QString():QStringLiteral("名称不能为空。"));};
     connect(edit,&QLineEdit::textChanged,&dialog,validate);
     connect(edit,&QLineEdit::returnPressed,&dialog,[&dialog,ok]{if(ok->isEnabled()) dialog.accept();});
