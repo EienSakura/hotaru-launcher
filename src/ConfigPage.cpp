@@ -1,4 +1,5 @@
 #include "ConfigPage.h"
+#include "BuildChannel.h"
 #include "platform/Autostart.h"
 #include "ShellMenu.h"
 #include "ClipboardStore.h"
@@ -750,6 +751,7 @@ ConfigPage::ConfigPage(QWidget* parent)
     auto* shell = new QGroupBox("资源管理器右键菜单", this);
     auto* shellLay = new QFormLayout(shell);
     m_shellMenu = new QCheckBox("在文件 / 文件夹的右键里加入 Hotaru 子菜单", shell);
+    m_shellMenu->setEnabled(!BuildChannel::development);
     m_shellMenu->setToolTip(QStringLiteral("子菜单里是：解压到当前目录、解压到同名文件夹、压缩为 .zip、压缩为 .7z、\n"
                                           "粉碎（不可恢复）、占用分析。\n"
                                           "后端是自带的 libarchive，zip / 7z / tar / gz / bz2 / xz / zstd / iso 都能解，"
@@ -1071,7 +1073,7 @@ void ConfigPage::load()
     QSettings cfg(Utils::dataDir() + "/config.ini", QSettings::IniFormat);
     const PinnedApps::LauncherConfig hotaruCfg = PinnedApps::config();
     m_autostart->setChecked(Platform::autostartEnabled());
-    const QString configuredHotkey = cfg.value("general/hotkey", "Alt+Space").toString();
+    const QString configuredHotkey = cfg.value("general/hotkey", BuildChannel::defaultHotkey()).toString();
     const bool doubleCtrl = configuredHotkey.compare(QStringLiteral("Ctrl+Ctrl"), Qt::CaseInsensitive) == 0;
     m_hotkey->setHotkeyText(doubleCtrl ? QStringLiteral("Ctrl+Ctrl") : configuredHotkey);
     m_hotkeyButton->setText(doubleCtrl ? QStringLiteral("双击 Ctrl（点击修改）")
@@ -1111,7 +1113,7 @@ void ConfigPage::load()
     m_archiveProgress->setChecked(cfg.value("ui/archiveProgress", false).toBool());
     // 三件事分开说：勾是你想要的，注册表里有没有是另一回事 —— 提供右键那几项的
     // 「右键动作」插件被卸载/禁用了，勾还留着，但右键里此刻没有 ltool。
-    m_shellInfo->setText(ShellMenu::installed()
+    m_shellInfo->setText(BuildChannel::development ? QStringLiteral("开发版不修改资源管理器菜单。") : ShellMenu::installed()
                               ? QStringLiteral("已集成。%1").arg(ShellMenu::locationHint())
                               : ShellMenu::intent()
                                     ? QStringLiteral("你勾了，但「右键动作」插件不在了（卸载或禁用）—— "
@@ -1163,7 +1165,12 @@ void ConfigPage::load()
 void ConfigPage::onSave()
 {
     QSettings cfg(Utils::dataDir() + "/config.ini", QSettings::IniFormat);
-    Platform::setAutostart(m_autostart->isChecked());
+    QString startupError;
+    if ((m_autostart->isChecked() || Platform::autostartEnabled())
+        && !Platform::setAutostart(m_autostart->isChecked(), &startupError)) {
+        m_autostart->setChecked(Platform::autostartEnabled());
+        QMessageBox::warning(this, QStringLiteral("登录启动"), startupError);
+    }
     if (m_shellMenu->isChecked() != ShellMenu::intent()) {
         // 只记下"你想不想要"；注册表那侧由 intent × 插件在不在 一起决定（syncWithPlugin）
         ShellMenu::setIntent(m_shellMenu->isChecked());
@@ -1174,7 +1181,7 @@ void ConfigPage::onSave()
     }
 
     // 快捷键
-    const QString oldHk = cfg.value("general/hotkey", "Alt+Space").toString();
+    const QString oldHk = cfg.value("general/hotkey", BuildChannel::defaultHotkey()).toString();
     const QString newHk = m_hotkey->hotkeyText();
     if (newHk.isEmpty()) {
         QMessageBox::warning(this, QStringLiteral("快捷键无效"),
@@ -1189,7 +1196,7 @@ void ConfigPage::onSave()
             return;
         }
         QSettings probeCfg(Utils::dataDir() + "/config.ini", QSettings::IniFormat);
-        const QString current = probeCfg.value("general/hotkey", "Alt+Space").toString();
+        const QString current = probeCfg.value("general/hotkey", BuildChannel::defaultHotkey()).toString();
         const bool sameAsCurrent = current.compare(newHk, Qt::CaseInsensitive) == 0;
         const int probeId = 0x6f41;
         const bool registered = RegisterHotKey(nullptr, probeId, mods | MOD_NOREPEAT, vk);
@@ -1462,7 +1469,7 @@ void ConfigPage::updateHotkeyStatus()
         return;
     }
     QSettings probeCfg(Utils::dataDir() + "/config.ini", QSettings::IniFormat);
-    const QString current = probeCfg.value("general/hotkey", "Alt+Space").toString();
+    const QString current = probeCfg.value("general/hotkey", BuildChannel::defaultHotkey()).toString();
     const QString text = seq.toString();
     if (current.compare(text, Qt::CaseInsensitive) == 0) {
         m_hotkeyStatus->setText(QStringLiteral("快捷键可用"));

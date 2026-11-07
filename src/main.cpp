@@ -7,6 +7,10 @@
 #include "QRegularExpression"
 #include "QCoreApplication"
 #include "platform/Autostart.h"
+#include "platform/CtrlTap.h"
+#include "platform/ResidentLock.h"
+#include "BuildChannel.h"
+#include <QTemporaryDir>
 #include "platform/Paths.h"
 #include "platform/Launch.h"
 #include "AdBlocker.h"
@@ -170,6 +174,10 @@ public:
     {
         uninstall();
         m_fn = std::move(fn);
+        for (unsigned vk = VK_BACK; vk < 256; ++vk) {
+            if (vk != VK_SHIFT && vk != VK_CONTROL && vk != VK_MENU && (GetAsyncKeyState(int(vk)) & 0x8000))
+                m_tap.prime(vk);
+        }
         s_instance = this;
         m_hook = SetWindowsHookExW(WH_KEYBOARD_LL, &CtrlDoubleTapHook::callback,
                                    GetModuleHandleW(nullptr), 0);
@@ -189,8 +197,8 @@ public:
         }
         if (s_instance == this)
             s_instance = nullptr;
-        m_down = false;
-        m_lastUp = 0;
+        m_tap = {};
+        ++m_generation;
         m_fn = {};
     }
 
@@ -199,18 +207,15 @@ private:
     {
         if (code == HC_ACTION && s_instance && data) {
             const auto* key = reinterpret_cast<const KBDLLHOOKSTRUCT*>(data);
-            const bool ctrl = key->vkCode == VK_LCONTROL || key->vkCode == VK_RCONTROL;
-            if (ctrl && (message == WM_KEYDOWN || message == WM_SYSKEYDOWN)) {
-                if (!s_instance->m_down) {
-                    if (s_instance->m_lastUp != 0
-                        && key->time - s_instance->m_lastUp <= 300
-                        && s_instance->m_fn)
-                        s_instance->m_fn();
-                    s_instance->m_down = true;
-                }
-            } else if (ctrl && (message == WM_KEYUP || message == WM_SYSKEYUP)) {
-                s_instance->m_down = false;
-                s_instance->m_lastUp = key->time;
+            const bool down = message == WM_KEYDOWN || message == WM_SYSKEYDOWN;
+            if ((down || message == WM_KEYUP || message == WM_SYSKEYUP)
+                && s_instance->m_tap.event(key->vkCode, down, key->flags & LLKHF_INJECTED, key->time)) {
+                auto* instance = s_instance;
+                const auto generation = instance->m_generation;
+                QMetaObject::invokeMethod(qApp, [instance, generation] {
+                    if (s_instance == instance && instance->m_generation == generation && instance->m_fn)
+                        instance->m_fn();
+                }, Qt::QueuedConnection);
             }
         }
         return CallNextHookEx(s_instance ? s_instance->m_hook : nullptr, code, message, data);
@@ -219,9 +224,45 @@ private:
     inline static CtrlDoubleTapHook* s_instance = nullptr;
     HHOOK m_hook = nullptr;
     std::function<void()> m_fn;
-    bool m_down = false;
-    DWORD m_lastUp = 0;
+    CtrlTap m_tap;
+    quint64 m_generation = 0;
 };
+
+bool oneShotCommand(const QString& flag)
+{
+    static const QSet<QString> commands = {
+        "--hotarutest", "--hotarupreview", "--theme-import", "--theme-select", "--smoke",
+        "--mfttest", "--mftree", "--searchtime", "--searchdump", "--disktime", "--rowmenu",
+        "--username", "--gridtest", "--cliptest", "--randtest", "--linuxdotest", "--linuxdonet",
+        "--startuptest", "--plugintest", "--about", "--updatecheck", "--diskbranch", "--diskui",
+        "--diskscale", "--regscan", "--startupscan", "--fw", "--uptime", "--adscan", "--fwtry",
+        "--fwallow", "--fwremove", "--whohastest", "--archivetest", "--snaprect", "--appdirs",
+        "--cfgcheck", "--seamtest", "--pinyin", "--archspeed", "--ocrtest", "--ocrlayout", "--pinpick",
+        "--ocrchain", "--memloop", "--pathcfg", "--storetest", "--pintool", "--pindel", "--ocrget",
+        "--recprobe", "--recq", "--rectest", "--recordui", "--ocrpanel", "--pinshot", "--shredtest"
+    };
+    return commands.contains(flag) || std::any_of(std::begin(kShellFlags), std::end(kShellFlags),
+        [&](const char* f) { return flag == QLatin1String(f); });
+}
+
+bool sendToResident(const QString& name, const QByteArray& request)
+{
+    if (request.size() > 4096)
+        return false;
+    QElapsedTimer timer;
+    timer.start();
+    do {
+        QLocalSocket socket;
+        socket.connectToServer(name);
+        if (socket.waitForConnected(100)) {
+            if (socket.write(request) != request.size())
+                return false;
+            return socket.bytesToWrite() == 0 || socket.waitForBytesWritten(300);
+        }
+        QThread::msleep(25);
+    } while (timer.elapsed() < 2500);
+    return false;
+}
 
 // QKeySequence → RegisterHotKey 的 (修饰键, 虚拟键)
 bool keySeqToHotkey(const QKeySequence& ks, UINT* mods, UINT* vk)
@@ -684,11 +725,54 @@ int runDiskTiming()
 
 } // namespace
 
+int runHotaruStartupSelftest();
+int runHotaruSearchSelftest();
+
 int main(int argc, char* argv[])
 {
     // libarchive 在 UTF-8 和窄字符之间转文件名时用的是 C 运行时 locale，而 Qt 不会去设它：
     // 默认 "C" 下任何非 ASCII 名字都转不过去，压缩带中文名的东西会直接失败。
     setlocale(LC_CTYPE, "");
+    const QString command = argc > 1 ? QString::fromLocal8Bit(argv[1]) : QString();
+    if (command == "--hotaru-channel-info") {
+        QCoreApplication cli(argc, argv);
+        std::printf("%s %s\n", qPrintable(BuildChannel::appId()), LTOOL_VERSION);
+        return 0;
+    }
+    if (command == "--hotarusearchtest") {
+        QApplication cli(argc, argv);
+        QTemporaryDir fixture;
+        if (!fixture.isValid())
+            return 2;
+        qputenv(BuildChannel::dataOverride, fixture.path().toUtf8());
+        return runHotaruSearchSelftest();
+    }
+    if (command == "--hotarustarttest" || command == "--hotaru-instance-probe") {
+        QCoreApplication cli(argc, argv);
+        if (command == "--hotarustarttest")
+            return runHotaruStartupSelftest();
+        const auto name = cli.arguments().value(2);
+        if (!name.startsWith("Hotaru.test.") || name.size() != 44)
+            return 2;
+        ResidentLock lock;
+        const auto result = lock.acquire(name);
+        std::printf("%s\n", result == ResidentLock::Owner ? "owner" : result == ResidentLock::Existing ? "existing" : "error");
+        std::fflush(stdout);
+        if (result == ResidentLock::Owner)
+            QThread::msleep(3000);
+        return result == ResidentLock::Error ? 1 : 0;
+    }
+    if (command == "--setup-autostart" || command == "--migrate-autostart" || command == "--remove-autostart") {
+        QCoreApplication cli(argc, argv);
+        QString error;
+        const bool ok = command == "--remove-autostart" ? Platform::setAutostart(false, &error)
+            : Platform::setupAutostart(command == "--setup-autostart", &error);
+        if (!ok) {
+            Utils::log(QStringLiteral("autostart: %1").arg(error));
+            std::fprintf(stderr, "%s\n", error.toUtf8().constData());
+        }
+        return ok ? 0 : 1;
+    }
     // --pindel 会真删 captures 目录里的往期截图，--ocrchain 要验"引擎还没下载"那条链（会真下 26MB），
     // --pathcfg 会写 config.ini 并建目录，--appdirs 会写 apps/roots 并扫盘，
     // --storetest 会写 store/indexUrl 这一项（它就是验"配置里改了地址就跟着走"），
@@ -717,7 +801,7 @@ int main(int argc, char* argv[])
             const QString sandbox = QDir::tempPath() + "/" + a.mid(2);
             QDir(sandbox).removeRecursively();
             QDir().mkpath(sandbox);
-            qputenv("LTOOL_DATA_DIR", sandbox.toUtf8());
+            qputenv(BuildChannel::dataOverride, sandbox.toUtf8());
             // 截图/录像的默认落点现在是 exe 旁边（软件目录），挪 APPDATA 管不到它。
             // 会往往期里写东西的那两个自测改用配置项把两个目录也指进沙箱 ——
             // 不然它们会在 build\Release 里留下 captures\，而那会被安装包收走。
@@ -791,6 +875,42 @@ int main(int argc, char* argv[])
     // 于是解引用别人家的堆；带任意 `--` 旗标反而不炸（predicate 第一个元素就命中，压根没走这个坏区间）——
     // 这就是为什么所有离线判据全绿、双击图标却必崩。盯着它的判据在 `--pathcfg` 最后一条：起一个**不给旗标**的子进程。
     const QStringList args = app.arguments();
+    const QString primary = args.value(1);
+    const bool loginStart = primary == "--autostart";
+    const bool inLoopSelftest = primary == "--toggle" || primary == "--capgeo" || primary == "--capflash"
+        || primary == "--storenet" || primary == "--storemulti" || primary == "--uninst" || primary == "--storeexit";
+    std::unique_ptr<QTemporaryDir> loopFixture;
+    if (inLoopSelftest) {
+        loopFixture = std::make_unique<QTemporaryDir>();
+        if (!loopFixture->isValid())
+            return 2;
+        qputenv(BuildChannel::dataOverride, loopFixture->path().toUtf8());
+    }
+    ResidentLock residentLock;
+    QLocalServer server;
+    if (!oneShotCommand(primary) && !inLoopSelftest) {
+        const auto name = hotaruInstanceKey();
+        const auto acquired = name.isEmpty() ? ResidentLock::Error : residentLock.acquire(name);
+        if (acquired == ResidentLock::Existing) {
+            if (loginStart)
+                return 0;
+            QByteArray request = "show\n";
+            if (primary == "--settings")
+                request = "settings\n";
+            else if (primary == "--settingspage")
+                request = "settingspage\t" + args.value(2).toUtf8() + '\t' + args.value(3).toUtf8()
+                    + '\t' + args.value(4).toUtf8() + '\n';
+            if (sendToResident(name, request))
+                return 0;
+            std::fputs("Hotaru 已运行，但暂时无法连接。\n", stderr);
+            return 1;
+        }
+        server.setSocketOptions(QLocalServer::UserAccessOption);
+        if (acquired != ResidentLock::Owner || !server.listen(name)) {
+            std::fputs("无法建立 Hotaru 的单实例通道。\n", stderr);
+            return 1;
+        }
+    }
     if (std::none_of(args.cbegin() + 1, args.cend(),
                      [](const QString& a) { return a.startsWith(QLatin1String("--")); })) {
         QString moved;
@@ -799,8 +919,8 @@ int main(int argc, char* argv[])
             Utils::log(QStringLiteral("data: %1（搬了 %2 个文件）").arg(moved).arg(movedN));
     }
     QApplication::setOrganizationName("Hotaru");
-    QApplication::setApplicationName("Hotaru");
-    QApplication::setApplicationDisplayName(QStringLiteral("萤 Hotaru"));
+    QApplication::setApplicationName(BuildChannel::appId());
+    QApplication::setApplicationDisplayName(BuildChannel::displayName());
     QApplication::setWindowIcon(Utils::appIcon());
     // 常驻托盘：最后一个窗口关闭（比如关掉设置页）不能退出程序
     app.setQuitOnLastWindowClosed(false);
@@ -3296,12 +3416,12 @@ int main(int argc, char* argv[])
         //    HKCU 的 Run 键（那是他机器的开机自启，不该被一次自测改掉）。
         const QString autoTarget = Platform::autostartTarget();
 #ifdef Q_OS_WIN
-        check("自启落点是 HKCU 那个 Run 键下的 ltool 值",
+        check("自启落点是 HKCU 那个 Run 键下的本渠道值",
               autoTarget.contains(QStringLiteral("CurrentVersion\\Run"))
-                  && autoTarget.endsWith(QStringLiteral("\\ltool")) ? "yes" : "no", "yes");
+                  && autoTarget.endsWith(QLatin1Char('\\') + BuildChannel::appId()) ? "yes" : "no", "yes");
         check("自启条目写的就是当前这个 exe（挪过安装目录要跟着走）",
-              Platform::autostartEntry(QStringLiteral("C:/x/y/ltool.exe"))
-                  == QStringLiteral("C:\\x\\y\\ltool.exe") ? "yes" : "no", "yes");
+              Platform::autostartEntry(QStringLiteral("C:/x y/Hotaru.exe"))
+                  == QStringLiteral("\"C:\\x y\\Hotaru.exe\" --autostart") ? "yes" : "no", "yes");
         std::printf("INFO 自启落点=[%s] 这台机器当前=%s（自测只读不写，不替他勾）\n",
                     autoTarget.toUtf8().constData(),
                     Platform::autostartEnabled() ? "已开" : "没开");
@@ -3479,9 +3599,19 @@ int main(int argc, char* argv[])
 #ifdef Q_OS_WIN
         check("Windows：安装根留空就是留空（= 不指定 --location，不是偷偷给个默认）",
               Platform::usableInstallRoot(QString()), QString());
-        check("Windows：配的盘符不在这台机器上（Z:）退到 C 盘同一个路径",
-              Platform::usableInstallRoot(QStringLiteral("Z:\\software")),
-              QStringLiteral("C:\\software"));
+        QString missingDrive;
+        for (QChar letter = u'Z'; letter >= QChar(u'D'); letter = QChar(letter.unicode() - 1)) {
+            if (!QDir(QString(letter) + QStringLiteral(":/")).exists()) {
+                missingDrive = QString(letter);
+                break;
+            }
+        }
+        if (missingDrive.isEmpty())
+            std::puts("SKIP Windows：没有可用于测试的缺失盘符");
+        else
+            check("Windows：缺失的盘符退到 C 盘同一个路径",
+                  Platform::usableInstallRoot(missingDrive + QStringLiteral(":\\software")),
+                  QStringLiteral("C:\\software"));
         check("Windows：C 盘自己和网络路径都不动",
               Platform::usableInstallRoot(QStringLiteral("C:\\tools"))
                       == QStringLiteral("C:\\tools")
@@ -4550,7 +4680,7 @@ int main(int argc, char* argv[])
             // 他那份常驻实例会当场把启动器叫到屏幕上（本机 21:15 就这么发生了一次，日志里留着那句
             // `show: 呼出（要求者=第二个实例转交过来的 show）`）。命名管道问一句就够了：
             // `WaitNamedPipeW` 只看"有没有人在听"，不建立连接、不写一个字节。
-            const QString pipe = QStringLiteral("\\\\.\\pipe\\") + QString::fromWCharArray(kInstanceKey);
+            const QString pipe = QStringLiteral("\\\\.\\pipe\\") + hotaruInstanceKey();
             if (WaitNamedPipeW((LPCWSTR)pipe.utf16(), 0)) {
                 std::printf("SKIP 冷启动子进程 —— 这台机器上有常驻实例，它会把启动器叫到他屏幕上，不打扰\n");
             } else {
@@ -4565,7 +4695,7 @@ int main(int argc, char* argv[])
                 boxCfg.sync();
                 QProcess child;
                 QProcessEnvironment pe = QProcessEnvironment::systemEnvironment();
-                pe.insert(QStringLiteral("LTOOL_DATA_DIR"), box);
+                pe.insert(QString::fromLatin1(BuildChannel::dataOverride), box);
                 pe.insert(QStringLiteral("QT_QPA_PLATFORM"), QStringLiteral("offscreen"));
                 child.setProcessEnvironment(pe);
                 QElapsedTimer et;
@@ -4602,7 +4732,7 @@ int main(int argc, char* argv[])
                         QThread::msleep(200);
                     const int before = showCount();
                     QLocalSocket bare;
-                    bare.connectToServer(QString::fromWCharArray(kInstanceKey));
+                    bare.connectToServer(hotaruInstanceKey());
                     if (bare.waitForConnected(1500)) {
                         QThread::msleep(600);            // 那边读一次、什么都不该做
                         bare.disconnectFromServer();
@@ -4610,7 +4740,7 @@ int main(int argc, char* argv[])
                     check("只连上、一个字节都不写的连接，不许被当成「把启动器叫出来」",
                           QString::number(showCount() - before), "0");
                     QLocalSocket ask;
-                    ask.connectToServer(QString::fromWCharArray(kInstanceKey));
+                    ask.connectToServer(hotaruInstanceKey());
                     if (ask.waitForConnected(1500)) {
                         ask.write("show\n");
                         ask.waitForBytesWritten(1500);
@@ -5480,57 +5610,50 @@ int main(int argc, char* argv[])
         return 1;
     }
 
-    // 单实例：第二个实例唤醒已运行的窗口后退出
-    //
-    // 但自测判据不能被单实例守卫转交给常驻实例（否则会变成"0 字节输出 + 退出码 0"的假绿形状）。
-    // 所有带 '--' 命令行旗标的调用（包括在事件循环内跑的 --capgeo/--capflash/--toggle/--settingspage 等），
-    // 均直接放行，不走单实例唤醒逻辑，避免后台常驻 ltool 时自测被静默吞掉。
-    const bool inLoopSelftest = std::any_of(args.cbegin() + 1, args.cend(), [](const QString& a) {
-        return a.startsWith(QLatin1String("--"));
-    });
-    if (!inLoopSelftest) {
-        QLocalSocket probe;
-        probe.connectToServer(QString::fromWCharArray(kInstanceKey));
-        if (probe.waitForConnected(300)) {
-            probe.write("show\n");
-            probe.waitForBytesWritten(300);
-            probe.disconnectFromServer();
-            return 0;
-        }
-    }
+    if (!server.isListening() && !inLoopSelftest)
+        return 1; // 一次性命令不得意外落入常驻路径。
 
     SearchWindow win;
-
-    QLocalServer::removeServer(QString::fromWCharArray(kInstanceKey));
-    QLocalServer server;
-    server.listen(QString::fromWCharArray(kInstanceKey));
-    QSystemTrayIcon* trayPtr = nullptr; // 稍后指向托盘，供热键提示和"递过来的气泡"使用
-    QObject::connect(&server, &QLocalServer::newConnection, [&] {
+    QSystemTrayIcon* trayPtr = nullptr;
+    QObject::connect(&server, &QLocalServer::newConnection, &win, [&] {
         while (server.hasPendingConnections()) {
-            QLocalSocket* c = server.nextPendingConnection();
-            c->waitForReadyRead(100);
-            const QByteArray msg = c->readAll();
-            c->disconnectFromServer();
-            c->deleteLater();
-            // **空的就当没这回事**：只连上、没写东西的连接太多了（判据探"这台机器上有没有常驻实例"、
-            // 半开的连接、被杀掉的发送方），把它们当成「把主窗口叫出来」= 别人一探测就抢他的屏幕。
-            // 真要叫窗口的那条路径自己会写 "show\n"（本机实测：判据那条探测真把他那份启动器叫出来了，
-            // 日志里留下 `show: 呼出（要求者=第二个实例转交过来的 show）`）。
-            if (msg.trimmed().isEmpty())
-                continue;
-            // 右键解压/压缩那个一次性进程把气泡递过来（"note\t标题\t正文"），
-            // 它自己不该为了举着气泡多活 5 秒。其余任何消息都还是"把主窗口叫出来"。
-            const QList<QByteArray> parts = msg.split('\t');
-            if (parts.value(0) == "note" && parts.size() >= 3) {
-                if (trayPtr)
-                    trayPtr->showMessage(QString::fromUtf8(parts.value(1).trimmed()),
-                                         QString::fromUtf8(parts.value(2).trimmed()),
-                                         QSystemTrayIcon::Information, 5000);
-                else
-                    Utils::log("note 到了但托盘还没建好，这条提示丢了");
-                continue;
-            }
-            win.showLauncher("第二个实例转交过来的 show");
+            auto* c = server.nextPendingConnection();
+            c->setReadBufferSize(4097);
+            QObject::connect(c, &QLocalSocket::disconnected, c, &QObject::deleteLater);
+            QTimer::singleShot(1000, c, &QLocalSocket::abort);
+            const auto receive = [&, c] {
+                if (c->bytesAvailable() > 4096) {
+                    c->abort();
+                    return;
+                }
+                if (!c->canReadLine())
+                    return;
+                const auto msg = c->readLine(4096).trimmed();
+                c->disconnectFromServer();
+                if (msg == "show") {
+                    win.showLauncher("第二个实例转交的显示请求");
+                } else if (msg == "settings") {
+                    win.openSettings();
+                } else if (msg.startsWith("settingspage\t")) {
+                    const auto fields = msg.split('\t');
+                    win.openSettingsPage(fields.value(1).toInt());
+                    for (QWidget* w : QApplication::topLevelWidgets()) {
+                        if (auto* dlg = qobject_cast<SettingsDialog*>(w); dlg && dlg->isVisible()) {
+                            dlg->openAt(fields.value(1).toInt(),
+                                fields.value(2).isEmpty() ? -1 : fields.value(2).toInt(),
+                                QString::fromUtf8(fields.value(3)));
+                            break;
+                        }
+                    }
+                } else if (msg.startsWith("note\t") && trayPtr) {
+                    const auto fields = msg.split('\t');
+                    if (fields.size() >= 3)
+                        trayPtr->showMessage(QString::fromUtf8(fields[1]), QString::fromUtf8(fields[2]),
+                                             QSystemTrayIcon::Information, 5000);
+                }
+            };
+            QObject::connect(c, &QLocalSocket::readyRead, c, receive);
+            receive();
         }
     });
 
@@ -5585,7 +5708,7 @@ int main(int argc, char* argv[])
     };
 
     QSettings cfg(Utils::dataDir() + "/config.ini", QSettings::IniFormat);
-    QString preferred = cfg.value("general/hotkey", "Alt+Space").toString();
+    QString preferred = cfg.value("general/hotkey", BuildChannel::defaultHotkey()).toString();
     UINT prefMods = MOD_ALT, prefVk = VK_SPACE;
     keySeqToHotkey(QKeySequence(preferred), &prefMods, &prefVk);
 
@@ -5602,7 +5725,9 @@ int main(int argc, char* argv[])
     const auto toggleFromHook = [window] {
         QMetaObject::invokeMethod(window, [window] { window->toggleVisible(); }, Qt::QueuedConnection);
     };
-    if (preferredDoubleCtrl) {
+    if (inLoopSelftest) {
+        // 窗口自测直接调用测试入口，不占用常驻热键。
+    } else if (preferredDoubleCtrl) {
         hotkeyOk = doubleCtrlHook.install(toggleFromHook);
         if (hotkeyOk) {
             hotkeyLabel = QStringLiteral("Ctrl+Ctrl");
@@ -5615,7 +5740,7 @@ int main(int argc, char* argv[])
         hotkeyLabel = preferred;
         curMods = m2;
         curVk = v2;
-    } else {
+    } else if (!BuildChannel::development) {
         Utils::log(QString("RegisterHotKey failed: %1 (err %2)")
                        .arg(preferred).arg(GetLastError()));
         for (const HotkeyCombo& c : combos) {
@@ -5640,7 +5765,8 @@ int main(int argc, char* argv[])
     // 不会自己长出来，启动时补写一次
     // 右键那几项该不该在 = 用户那个勾 × 「右键动作」插件在不在（卸载/禁用就撤掉，
     // 装回来自动写上）。里面顺带做了老那件"表里加了项、老机器不会自己变"的重写。
-    ShellMenu::syncWithPlugin();
+    if (!inLoopSelftest)
+        ShellMenu::syncWithPlugin();
 
     // 托盘气泡提示当前实际热键
     std::function<void()> updateMenuHotkey = [] {}; // 托盘创建后赋值
@@ -5758,6 +5884,7 @@ int main(int argc, char* argv[])
 
     // 托盘
     QSystemTrayIcon tray(Utils::appIcon());
+    tray.setToolTip(BuildChannel::displayName());
     trayPtr = &tray;
     QMenu menu;
     // 这份样式全程序只有 Theme::menuStyle() 那一份（这里以前另抄了一份字面量，
@@ -5787,11 +5914,21 @@ int main(int argc, char* argv[])
     QAction* autoRun = menu.addAction("开机自启");
     autoRun->setCheckable(true);
     autoRun->setChecked(Platform::autostartEnabled());
-    QObject::connect(autoRun, &QAction::toggled, &Platform::setAutostart);
+    QObject::connect(autoRun, &QAction::toggled, &tray, [autoRun, &tray](bool enabled) {
+        QString error;
+        if (!Platform::setAutostart(enabled, &error)) {
+            const bool blocked = autoRun->blockSignals(true);
+            autoRun->setChecked(Platform::autostartEnabled());
+            autoRun->blockSignals(blocked);
+            tray.showMessage(QStringLiteral("登录启动"), error, QSystemTrayIcon::Warning);
+            Utils::log(QStringLiteral("autostart: %1").arg(error));
+        }
+    });
     menu.addSeparator();
     QObject::connect(menu.addAction("退出"), &QAction::triggered, &QApplication::quit);
     tray.setContextMenu(&menu);
-    tray.show();
+    if (!inLoopSelftest)
+        tray.show();
     QObject::connect(&tray, &QSystemTrayIcon::activated, [&](QSystemTrayIcon::ActivationReason r) {
         if (r != QSystemTrayIcon::Trigger && r != QSystemTrayIcon::DoubleClick)
             return;
@@ -5817,7 +5954,7 @@ int main(int argc, char* argv[])
                 return;
             trayBusy = false;
             tray.setIcon(idleIcon);
-            tray.setToolTip("萤 Hotaru");
+            tray.setToolTip(BuildChannel::displayName());
             logAction->setText("安装日志");
             return;
         }
@@ -5831,12 +5968,12 @@ int main(int argc, char* argv[])
     });
     spinTimer->start();
 
-    if (!hotkeyOk) {
+    if (!inLoopSelftest && !hotkeyOk) {
         tray.showMessage("萤 Hotaru", "所有热键组合注册失败（可能被其他软件占用）\n"
                                   "可通过托盘图标打开搜索框，详见 %APPDATA%\\ltool\\log.txt",
                          QSystemTrayIcon::Warning, 8000);
         Utils::log("hotkey: all combos failed");
-    } else if (hotkeyLabel != preferred) {
+    } else if (!inLoopSelftest && hotkeyLabel != preferred) {
         // 启动即降级：明确告知当前实际热键（此后每 30 秒自动尝试夺回首选热键）
         QTimer::singleShot(1500, &win, [&] { notifyHotkey(hotkeyLabel); });
     }
@@ -5856,8 +5993,10 @@ int main(int argc, char* argv[])
         else
             Utils::log(QStringLiteral("%1 hotkey registered by plugin %2").arg(label, owner));
     };
-    registerPluginHotkey(kCaptureId, QStringLiteral("capture"), QStringLiteral("F1 capture"), VK_F1);
-    registerPluginHotkey(kRecordId, QStringLiteral("record"), QStringLiteral("F2 record"), VK_F2);
+    if (!inLoopSelftest) {
+        registerPluginHotkey(kCaptureId, QStringLiteral("capture"), QStringLiteral("F1 capture"), VK_F1);
+        registerPluginHotkey(kRecordId, QStringLiteral("record"), QStringLiteral("F2 record"), VK_F2);
+    }
 
     // 托盘“退出”进入 aboutToQuit 时，先主动撤销热键、低级键盘钩子和单实例管道。
     // Windows 进程结束本来也会回收它们，但显式清理能避免退出瞬间的旧实例残留。
@@ -5868,26 +6007,29 @@ int main(int argc, char* argv[])
         server.close();
     });
 
-    win.startInitialScan(); // 启动即后台扫描（增量优先）
-    TaskScheduler::instance().start(); // 定时任务调度（每 30 秒检查）
-    // 广告弹窗拦截器：常驻，配置里勾了"自动拦截"就一直在跑 ——
-    // 以前它是设置页里的一个 QTimer，页面一销毁就停，等于从来没真正生效过
-    AdBlocker::instance().start();
-    // 挂了牌（plugin.json 的 "Activate"）的插件在这一步被叫起来：它们后台跑的东西
-    // 不靠页面活着 —— 页是点开卡片才建的。没人挂牌就是零成本（一个 dll 都不多装）。
-    PluginHost::startBackground();
-    // 剪贴板历史：默认关闭，勾了才在后台收（见设置 → 配置 → 剪贴板）
-    ClipboardStore::instance().start();
+    if (!inLoopSelftest) {
+        FileIndexer::instance().restoreCachedSnapshot();
+        QTimer::singleShot(loginStart ? 30000 : 0, &win, [&win] { win.startInitialScan(true); });
+        TaskScheduler::instance().start();
+        ClipboardStore::instance().start();
+        QTimer::singleShot(loginStart ? 35000 : 0, &app, [] {
+            AdBlocker::instance().start();
+            PluginHost::startBackground();
+        });
+    }
 
     // 以前这里每 10 分钟 EmptyWorkingSet 一次，看起来"内存漂亮"，代价是下一次按热键
     // 要把整个 Qt + 索引的页换回来，实测就是"唤出很卡"。只在截图那种一次性大块内存后回收。
-    // 启动 1.2 秒后把启动器窗口预热一次（见 SearchWindow::warmUp）
-    QTimer::singleShot(1200, &win, &SearchWindow::warmUp);
-    // 每天一次的插件自动更新（他 2026-10-21 点名：「插件商店增加一个自动更新功能，一天自动更新一次」）。
-    // 延迟十几秒才跑：冷启动那阵子在扫应用 + 预热窗口，别让一条慢网络把"呼出很卡"带上；
-    // 带 '--' 旗标的自测进程一律不跑（那会变成边测边往插件目录写 dll）。
-    if (!inLoopSelftest && PluginStore::autoUpdateEnabled()) {
-        QTimer::singleShot(15000, &app, [] {
+    // 等首轮索引结束再检查商店更新，避免登录时两个后台任务争用磁盘。
+    if (!inLoopSelftest && !args.contains("--autoupdatenow") && PluginStore::autoUpdateEnabled()) {
+        auto* updateTimer = new QTimer(&win);
+        updateTimer->setSingleShot(true);
+        QObject::connect(updateTimer, &QTimer::timeout, &win, [updateTimer, &win] {
+            if (win.isScanningApps() || FileIndexer::instance().isIndexing()) {
+                updateTimer->start(5000);
+                return;
+            }
+            updateTimer->deleteLater();
             auto sw = std::make_shared<QElapsedTimer>();
             sw->start();
             PluginStore::runDailyUpdate(nullptr, [sw](const QString& note) {
@@ -5895,6 +6037,7 @@ int main(int argc, char* argv[])
                     Utils::log(QStringLiteral("store: 自动更新这一趟 %1 ms：%2").arg(sw->elapsed()).arg(note));
             });
         });
+        updateTimer->start(loginStart ? 45000 : 15000);
     }
     // --autoupdatenow：立刻跑那一趟（不等 15 秒）。要联网、会**真往插件目录写 dll**，
     // 所以不进 CI，也不该在别的自测里顺带跑。它存在的理由：那条链（拉清单 → 挑 → 一颗一颗装 →
@@ -5949,7 +6092,7 @@ int main(int argc, char* argv[])
 
     // --toggle：验"按热键到底出不出来"。三种真实情形各按一次：冷状态、被最小化过
     // （Win+D 也算）、窗口还"可见但躲在别的程序后面"。不合成鼠标键盘，只开自己的窗口抢前台。
-    // 必须冷启动跑：另有实例在跑时命令行参数会被转发掉，那种情况下这个测试不会执行。
+    // 用独立数据目录运行；真实前台和最小化状态需要 Windows 窗口后端。
     int toggleBad = 0;
     if (args.contains("--toggle")) {
         const auto check = [&toggleBad](const char* name, bool ok, const QString& got) {

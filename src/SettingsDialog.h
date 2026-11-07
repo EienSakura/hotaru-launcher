@@ -35,13 +35,16 @@ signals:
 
 private:
     void ensurePage(int index);
+    QWidget* buildPluginHome();
+    ToolsPage* openCompatibilityPlugins();
     void buildBusyRow();
     void refreshBusy();     // 菜单左下角的加载标志：有后台静默安装在跑才出现
 
     QListWidget* m_menu = nullptr;
     QStackedWidget* m_stack = nullptr;
     bool m_built[4] = {};
-    ToolsPage* m_toolsPage = nullptr;   // 行 1「插件商店」：搜索框要让它展开某个工具
+    QStackedWidget* m_pluginStack = nullptr;
+    ToolsPage* m_toolsPage = nullptr;
     QToolButton* m_busy = nullptr;
     QTimer* m_busyTimer = nullptr;
     int m_busyFrame = 0;

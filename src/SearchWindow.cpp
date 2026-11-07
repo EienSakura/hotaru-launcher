@@ -1,4 +1,5 @@
 #include "SearchWindow.h"
+#include "BuildChannel.h"
 #include "platform/ProcInfo.h"
 #include "platform/Launch.h"
 #include "platform/Paths.h"
@@ -289,6 +290,8 @@ QString usageKey(const QString& lnkPath, const QString& target)
 
 int scoreApp(const AppEntry& a, const QString& low)
 {
+    if (SysTools::aliasMatches(a, low))
+        return 0;
     const QString n = a.name.toLower();
     if (n.startsWith(low))
         return 0;
@@ -319,7 +322,7 @@ int scoreApp(const AppEntry& a, const QString& low)
 SearchWindow::SearchWindow(QWidget* parent)
     : QWidget(parent)
 {
-    setWindowTitle(QStringLiteral("萤 Hotaru 搜索"));
+    setWindowTitle(BuildChannel::displayName() + QStringLiteral(" 搜索"));
     buildUi();
     loadUsage();
     m_apps = AppScanner::loadIndex();
@@ -491,7 +494,6 @@ void SearchWindow::buildUi()
         });
         m_periodicScan->start();
     }
-    watchAppDirs();
 }
 
 // 监视快捷方式所在的目录（含子目录，深度与 AppScanner::scan 一致）。
@@ -654,6 +656,8 @@ void SearchWindow::showLauncher(const char* why)
     move(g.center().x() - width() / 2, g.top() + int(g.height() * 0.20));
     m_input->clear(); // 再次呼出不保留上一次的搜索
     runSearch();
+    if (FileIndexer::instance().count() == 0 && FileIndexer::instance().deepCount() == 0)
+        setStatus(QStringLiteral("正在准备文件索引，应用和快捷搜索可以使用"));
     const auto pageConfig=PinnedApps::config();
     m_grid->setPage(pageConfig.rememberPage?pageConfig.lastPage:0);
     const qint64 msLayout = lap.elapsed();
@@ -696,32 +700,7 @@ void SearchWindow::showLauncher(const char* why)
 
 void SearchWindow::warmUp()
 {
-    if (m_warmed || isVisible())
-        return;
-    m_warmed = true;
-    // 第一次 show() 要付 Qt 建原生窗口 + DWM 首帧 + 字体/委托首次绘制的钱（实测约 300ms），
-    // 那笔钱本来全落在用户第一次按热键上。挪到所有显示器之外映射一遍再收起，界面看不到。
-    const QPoint saved = pos();
-    // 两道保险：位置挪到显示器之外（Qt 有时会把它夹回屏幕内），同时整窗透明度压到 0
-    setWindowOpacity(0.0);
-    move(-32000, -32000);
-    show();
-    repaint();
-    QCoreApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
-    // 这一行量的必须是**停在预热位置那一刻**的矩形。以前它排在 `move(saved)` 之后才读 x()/y()，
-    // 读到的是恢复完的落点（本机日志一直打 (0,0 660x100) 就是这个），
-    // 而"有没有被 Qt 夹回屏幕里"这件事当场就测不到 —— 被夹回来的话，那一下就是"搜索框自己闪出来"。
-    const QRect parked = geometry();
-    bool onScreen = false;
-    for (QScreen* sc : QGuiApplication::screens())
-        if (sc->geometry().intersects(parked)) { onScreen = true; break; }
-    hide();
-    setWindowOpacity(1.0);
-    move(saved);
-    Utils::log(QStringLiteral("warmup: 预热时窗口矩形=(%1,%2 %3x%4) · %5")
-                   .arg(parked.x()).arg(parked.y()).arg(parked.width()).arg(parked.height())
-                   .arg(onScreen ? QStringLiteral("还压在某个显示器里（只靠透明度 0 遮着）")
-                                 : QStringLiteral("在所有显示器之外")));
+    ensurePolished();
 }
 
 void SearchWindow::toggleVisible()
@@ -1818,6 +1797,10 @@ void SearchWindow::runSearch()
             ms.append({s, i});
     }
     std::sort(ms.begin(), ms.end(), [this](const Match& a, const Match& b) {
+        const bool sa = m_apps[a.idx].category == QLatin1String("system");
+        const bool sb = m_apps[b.idx].category == QLatin1String("system");
+        if (sa != sb)
+            return sa;
         if (a.score != b.score)
             return a.score < b.score;
         const int ua = m_usage.value(usageKey(m_apps[a.idx].lnkPath, m_apps[a.idx].target), 0);
@@ -1835,6 +1818,31 @@ void SearchWindow::runSearch()
     // 剪贴板历史」五节整个没跑到 —— 那是一条有特权的路，拿真实的 apps.json 复算过：
     // 这台机器上 51 个查询串会命中它、连带 44 个应用永远搜不出来（最刺眼的是 `windows`：
     // 「Windows 用户名」那把工具的名字本身就是 windows 开头，于是所有 Windows* 应用没了）。
+    // 快捷搜索只取第一个完整词，后续内容不会拼接到目标地址或命令参数。
+    // 兜底那条以前单独甩在整个列表最末尾，等于"网站"这一类排到了最后 —— 现在三条挨着放。
+    // webs / webTok 在工具那一节之前就算好了。
+    // 这一组**以前没有表头**：那几行直接跟在上一节的表头（搜 `b64` 时就是"工具"）底下，
+    // 看着像工具的结果。补一个快捷搜索分组表头。
+    for (const WebEntry& w : webs) {
+        if (!w.keys.contains(webTok) && w.name.compare(webTok, Qt::CaseInsensitive) != 0)
+            continue;
+        addSection(QStringLiteral("── 快捷搜索 ──"));
+        SearchResult r;
+        r.kind = SearchResult::QuickSearch;
+        r.title = w.name;
+        const QString target = w.target.isEmpty() ? w.url : w.target;
+        const QString typeLabel = w.targetType == QLatin1String("folder") ? QStringLiteral("磁盘文件夹")
+            : w.targetType == QLatin1String("app") ? QStringLiteral("应用或脚本") : QStringLiteral("网页");
+        r.subtitle = QStringLiteral("快捷搜索 · %1 · %2").arg(typeLabel, target);
+        r.target = target;
+        r.extra = w.targetType;
+        r.icon = w.targetType == QLatin1String("folder") ? QApplication::style()->standardIcon(QStyle::SP_DirIcon)
+            : w.targetType == QLatin1String("app") ? Utils::cachedFileIcon(target) : letterIcon(w.name, colorForKind(target));
+        if (r.icon.isNull()) r.icon = letterIcon(w.name, colorForKind(target));
+        addItem(r);
+        break;
+    }
+
     const bool toolFirst = !toolExact.isEmpty() && !webKeywordWins;
     if (toolFirst) {
         addSection(QStringLiteral("工具"));
@@ -1914,9 +1922,19 @@ void SearchWindow::runSearch()
 
     if (!ms.isEmpty())
         addSection("── 应用 ──");
-    const int appLimit = qMin(8, ms.size());
-    for (int k = 0; k < appLimit; ++k) {
+    QStringList systemTargets;
+    int shownApps = 0;
+    for (int k = 0; k < ms.size() && shownApps < 8; ++k) {
         const AppEntry& a = m_apps[ms[k].idx];
+        if (!a.target.isEmpty()) {
+            const QString key = QDir::cleanPath(QDir::fromNativeSeparators(a.target)).toCaseFolded()
+                                + QLatin1Char('\n') + a.args.trimmed();
+            if (systemTargets.contains(key))
+                continue;
+            if (a.category == QLatin1String("system"))
+                systemTargets.append(key);
+        }
+        ++shownApps;
         SearchResult r;
         r.kind = SearchResult::App;
         r.title = a.name;
@@ -1931,30 +1949,6 @@ void SearchWindow::runSearch()
         addItem(r);
     }
 
-    // 快捷搜索只取第一个完整词，后续内容不会拼接到目标地址或命令参数。
-    // 兜底那条以前单独甩在整个列表最末尾，等于"网站"这一类排到了最后 —— 现在三条挨着放。
-    // webs / webTok 在工具那一节之前就算好了。
-    // 这一组**以前没有表头**：那几行直接跟在上一节的表头（搜 `b64` 时就是"工具"）底下，
-    // 看着像工具的结果。补一个快捷搜索分组表头。
-    const int webMark = m_results.size();
-    for (const WebEntry& w : webs) {
-        if (!w.keys.contains(webTok) && w.name.compare(webTok, Qt::CaseInsensitive) != 0)
-            continue;
-        SearchResult r;
-        r.kind = SearchResult::QuickSearch;
-        r.title = w.name;
-        const QString target = w.target.isEmpty() ? w.url : w.target;
-        const QString typeLabel = w.targetType == QLatin1String("folder") ? QStringLiteral("磁盘文件夹")
-            : w.targetType == QLatin1String("app") ? QStringLiteral("应用或脚本") : QStringLiteral("网页");
-        r.subtitle = QStringLiteral("快捷搜索 · %1 · %2").arg(typeLabel, target);
-        r.target = target;
-        r.extra = w.targetType;
-        r.icon = w.targetType == QLatin1String("folder") ? QApplication::style()->standardIcon(QStyle::SP_DirIcon)
-            : w.targetType == QLatin1String("app") ? Utils::cachedFileIcon(target) : letterIcon(w.name, colorForKind(target));
-        if (r.icon.isNull()) r.icon = letterIcon(w.name, colorForKind(target));
-        addItem(r);
-        break;
-    }
     if (WebShortcuts::looksLikeUrl(q)) {
         SearchResult r;
         r.kind = SearchResult::Web;
@@ -1964,29 +1958,22 @@ void SearchWindow::runSearch()
         r.icon = letterIcon("网", QColor(31, 141, 160));
         addItem(r);
     }
+    if (!toolLoose.isEmpty()) {
+        addSection(QStringLiteral("工具"));
+        for (const int i : std::as_const(toolLoose))
+            addToolRow(i);
+    }
+
     // 网络搜索兜底（始终提供）
     if (low.size() >= 2) {
         SearchResult r;
         r.kind = SearchResult::Web;
+        r.extra = QStringLiteral("search-engine");
         r.title = QString("用搜索引擎搜索 “%1”").arg(q);
         r.subtitle = WebShortcuts::engineSearchUrl(q);
         r.target = WebShortcuts::engineSearchUrl(q);
         r.icon = letterIcon("搜", QColor(136, 87, 229));
         addItem(r);
-    }
-    if (m_results.size() > webMark) {
-        SearchResult h;
-        h.kind = SearchResult::Info;
-        h.actionable = false;
-        h.isSection = true;
-        h.title = QStringLiteral("── 快捷搜索 ──");
-        m_results.insert(webMark, h);   // 表头补在这一组最前面（列表是 rebuildList() 时按 m_results 铺的）
-    }
-
-    if (!toolLoose.isEmpty()) {
-        addSection(QStringLiteral("工具"));
-        for (const int i : std::as_const(toolLoose))
-            addToolRow(i);
     }
 
     // 文件搜索（≥2 个字符才搜，避免太泛）：丢到线程池，结果稍后插回列表
@@ -2008,7 +1995,8 @@ void SearchWindow::runSearch()
 void SearchWindow::startFileSearch(const QString& q)
 {
     if (m_fileSearchBusy) {
-        m_fileSearchRerun = true;
+        m_pendingFileQuery = q;
+        m_pendingFileSeq = m_searchSeq;
         return;
     }
     m_fileSearchBusy = true;
@@ -2020,16 +2008,19 @@ void SearchWindow::startFileSearch(const QString& q)
                 const auto files = watcher->result();
                 watcher->deleteLater();
                 m_fileSearchBusy = false;
-                if (m_fileSearchRerun) {
-                    m_fileSearchRerun = false;
-                    runSearch();
-                    return;
+                const QString current = halfWidth(m_input->text()).trimmed();
+                if (!m_pendingFileQuery.isEmpty()) {
+                    const auto pending = std::exchange(m_pendingFileQuery, QString());
+                    if (m_pendingFileSeq == m_searchSeq && current == pending)
+                        startFileSearch(pending);
                 }
-                if (seq != m_searchSeq || halfWidth(m_input->text()).trimmed() != q)
+                if (seq != m_searchSeq || current != q)
                     return;   // 查询已变，结果作废
                 if (files.isEmpty())
                     return;
 
+                const int oldRow = m_list->currentRow();
+                const SearchResult selected = m_results.value(oldRow);
                 for (int i = m_results.size() - 1; i >= 0; --i)
                     if (m_results[i].kind == SearchResult::Info
                         && m_results[i].title == QStringLiteral("无匹配结果"))
@@ -2037,10 +2028,9 @@ void SearchWindow::startFileSearch(const QString& q)
                 int pos = m_results.size();
                 // 插在"用搜索引擎搜索…"那条兜底行之前 = 应用/网站/工具之后。
                 // 以前是找第一条 Web 行，于是命中网站快捷方式时文件会被顶到最上面。
-                const QString fallbackUrl = WebShortcuts::engineSearchUrl(q);
                 for (int i = 0; i < m_results.size(); ++i) {
                     if (m_results[i].kind == SearchResult::Web
-                        && m_results[i].target == fallbackUrl) {
+                        && m_results[i].extra == QLatin1String("search-engine")) {
                         pos = i;
                         break;
                     }
@@ -2057,13 +2047,29 @@ void SearchWindow::startFileSearch(const QString& q)
                     r.title = fe.name;
                     r.subtitle = fe.path;
                     r.target = fe.path;
-                    r.icon = Utils::cachedFileIcon(fe.path);
+                    r.icon = fe.isDir ? style()->standardIcon(QStyle::SP_DirIcon)
+                                      : Utils::cachedFileIcon(fe.path);
                     m_results.insert(pos++, r);
                 }
                 rebuildList();
+                // 如果用户已经选了某项，后台插入文件结果时保留原来的选择。
+                // 默认选中的兜底网页可以让位给新到的首条实际结果。
+                const int first = firstActionableRow();
+                if (oldRow >= 0 && selected.actionable && !selected.isSection
+                    && selected.extra != QLatin1String("search-engine")) {
+                    for (int i = 0; i < m_results.size(); ++i) {
+                        const auto& result = m_results[i];
+                        if (result.kind == selected.kind && result.title == selected.title
+                            && result.target == selected.target && result.extra == selected.extra) {
+                            if (i != first)
+                                m_list->setCurrentRow(i);
+                            break;
+                        }
+                    }
+                }
             });
     watcher->setFuture(QtConcurrent::run(
-        [q]() { return FileIndexer::instance().search(q, 8); }));
+        [q]() { return FileIndexer::instance().search(q, 8, 2); }));
 }
 
 // ---------- 激活 ----------
@@ -2571,7 +2577,7 @@ void SearchWindow::handleReg(const QString& rest)
 
 // ---------- 扫描 ----------
 
-void SearchWindow::startScan(bool quiet, bool forceDeep)
+void SearchWindow::startScan(bool quiet, bool forceDeep, bool sequential)
 {
     if (!m_scanning.testAndSetRelaxed(0, 1))
         return;
@@ -2581,20 +2587,23 @@ void SearchWindow::startScan(bool quiet, bool forceDeep)
         return list;
     });
     auto* watcher = new QFutureWatcher<QVector<AppEntry>>(this);
-    connect(watcher, &QFutureWatcher<QVector<AppEntry>>::finished, this, [this, watcher, quiet] {
+    connect(watcher, &QFutureWatcher<QVector<AppEntry>>::finished, this, [this, watcher, quiet, sequential, forceDeep] {
         m_apps = watcher->result();
         m_apps += SysTools::systemTools();
         watcher->deleteLater();
         m_scanning.storeRelaxed(0);
         Utils::log(QString("scan finished: %1 apps").arg(m_apps.size()));
         watchAppDirs();     // 安装器常新建子目录，扫完补挂一次监视
+        if (sequential)
+            FileIndexer::instance().reindexAsync(forceDeep);
         if (!quiet) {
             setStatus(QString("扫描完成：应用 %1 · 文件索引进行中…").arg(m_apps.size()));
             runSearch();
         }
     });
     watcher->setFuture(future);
-    FileIndexer::instance().reindexAsync(forceDeep);
+    if (!sequential)
+        FileIndexer::instance().reindexAsync(forceDeep);
     if (!quiet)
         setStatus("正在扫描桌面与开始菜单…");
 }

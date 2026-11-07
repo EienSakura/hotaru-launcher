@@ -12,7 +12,12 @@
 namespace Platform {
 
 void setAutostart(bool on);
+bool setAutostart(bool on, QString* error);
 bool autostartEnabled();
+#ifdef _WIN32
+bool setupAutostart(bool selected, QString* error = nullptr);
+bool autostartSelftest();
+#endif
 
 // 条目落在哪儿（Windows 是那个注册表键，POSIX 是那个文件）。暴露出来是为了能被判据直接问：
 // 这条路一旦拼错，现象只有"勾了没反应"，没有任何别的可观测面。

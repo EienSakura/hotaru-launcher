@@ -61,7 +61,7 @@ public:
     // 第二个实例转交过来的 "show"），而**只有热键那条以前留日志** —— 于是"它怎么自己出来了"
     // 在现场查不到。现在每一条都必须报上名字（2026-10-21 他问的就是这个）。
     void showLauncher(const char* why);
-    void warmUp();   // 启动后先映射+绘制一遍，别把这份开销留给第一次按热键
+    void warmUp();   // 仅整理 Qt 样式，不显示窗口
 
     // 失焦那一条到底该不该收：抽成静态纯函数，是为了这两支能在离屏问出来
     //（离屏**抢不到前台**，真造不出"拿到过前台之后点走"那一次，只能问谓词本身）。
@@ -78,7 +78,8 @@ public:
     static BlurAction blurAction(bool hadForeground, bool backToPrevious, qint64 msSinceShow,
                                  bool menuVisible, bool capturing);
     void rescan() { startScan(false, true); }        // 手动：强制全量重建
-    void startInitialScan() { startScan(false, false); } // 启动：增量优先
+    void startInitialScan(bool sequential = false) { startScan(true, false, sequential); }
+    bool isScanningApps() const { return m_scanning.loadRelaxed() != 0; }
     void setHotkeyLabel(const QString& label);
     void setStatus(const QString& detail);
     void openSettings();
@@ -139,7 +140,7 @@ private:
     void moveCurrent(int dir);
     int firstActionableRow() const;
 
-    void startScan(bool quiet, bool forceDeep);
+    void startScan(bool quiet, bool forceDeep, bool sequential = false);
     void watchAppDirs();        // 监听开始菜单/桌面：装了新软件马上进索引
     QString currentCommandTarget() const;   // 当前行若是命令条目，返回它的 target
     bool pasteClipToPrevious();             // Ctrl+Enter：放回剪贴板并粘给呼出前的窗口
@@ -181,7 +182,8 @@ private:
     WId m_prevFg = 0;        // 启动器弹出前的前台窗口（剪贴板历史要粘回给它）
     quint64 m_searchSeq = 0;      // 每次搜索递增，用于丢弃过期的异步结果
     bool m_fileSearchBusy = false;
-    bool m_fileSearchRerun = false;
+    QString m_pendingFileQuery;
+    quint64 m_pendingFileSeq = 0;
 
     QVector<SearchResult> m_results;
     QVector<RegIssue> m_regIssues;
@@ -194,7 +196,6 @@ private:
     QElapsedTimer m_showTime; // 用于忽略弹出瞬间的失焦，避免闪烁隐藏
     QElapsedTimer m_showLatency;   // 从按下呼出到画出来的分段计时（诊断"唤出慢"）
     bool m_paintLogged = false;
-    bool m_warmed = false;
     // 这一次呼出**有没有真的拿到过前台**。它是"失焦"该不该收起的那道判据的输入：
     // 拿到过 = 用户真的点走了（立刻收）；从来没拿到过 = 激活竞争/前台锁没抢到（先别动，见 blurAction）。
     bool m_hadForeground = false;

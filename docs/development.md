@@ -84,6 +84,17 @@ Start-Process -FilePath './build/Release/Hotaru.exe' -ArgumentList '--show' `
 
 此处使用环境中的 `LTOOL_DATA_DIR`。如需使用已有开发数据，应显式指定对应目录；测试不要指向真实用户配置。
 
+### 独立开发版
+
+本机验收使用独立的开发版。沿用上面的 CMake 配置参数，把构建目录改为 `build/dev` 并加 `-DHOTARU_DEV_BUILD=ON`；继续保持 `HOTARU_BUNDLE_PLUGINS=OFF`。构建后运行：
+
+```powershell
+cmake --build build/dev --config Release --target ltool --parallel 4
+.\tools\package-dev.ps1 -BuildDirectory build/dev -OutputFile build/Hotaru-dev-x64.zip
+```
+
+ZIP 中的 `HotaruDev.exe` 使用独立的单实例通道、`data-dev`、`ltool-plugins-dev`、`HotaruDev` 登录项与默认 **Ctrl+Alt+H**，不迁移旧数据，不写资源管理器菜单。开发版测试数据覆盖变量为 `HOTARU_DEV_DATA_DIR`。正式版默认 `HOTARU_DEV_BUILD=OFF`，原来的构建和安装器用法不变。参见[实机测试清单](development-testing.md)。
+
 ## 工具插件
 
 默认 `HOTARU_BUNDLE_PLUGINS=OFF`。需要同时编译仓库保留的工具时，在CMake配置中改为 `ON`，再构建 `ltool`。该操作会编译并部署工具DLL，通常开发启动器无需开启。

@@ -1,4 +1,5 @@
 #include "SettingsDialog.h"
+#include "BuildChannel.h"
 
 #include "ConfigPage.h"
 #include "SilentInstallLog.h"
@@ -9,6 +10,9 @@
 #include "Utils.h"
 
 #include <QEvent>
+#include <QFrame>
+#include <QLabel>
+#include <QPushButton>
 
 #include <QHBoxLayout>
 #include <QIcon>
@@ -241,7 +245,7 @@ bool SettingsDialog::event(QEvent* e)
 SettingsDialog::SettingsDialog(QWidget* parent)
     : QDialog(parent)
 {
-    setWindowTitle("萤 Hotaru 设置");
+    setWindowTitle(BuildChannel::displayName() + QStringLiteral(" 设置"));
     resize(1140, 790);
     applyThemeQss();   // 见下面那颗：夜间/日间切换时要能原地重算这一份
 
@@ -259,7 +263,7 @@ SettingsDialog::SettingsDialog(QWidget* parent)
     // 每一行都使用独立绘制的矢量图形；插件商店沿用袋子图标，其余页面使用功能图形。
     const MenuDef defs[] = {
         {"快捷搜索", QColor(6, 182, 212), 0},
-        {"插件商店", QColor(249, 115, 22), 1},
+        {"插件", QColor(249, 115, 22), 1},
         {"配置", QColor(59, 130, 246), 2},
         {"关于", QColor(168, 85, 247), 3},
     };
@@ -342,10 +346,7 @@ void SettingsDialog::ensurePage(int index)
     QWidget* page = nullptr;
     switch (index) {
     case 0: page = new WebsitesPage(this); break;
-    case 1:
-        m_toolsPage = new ToolsPage(this);
-        page = m_toolsPage;
-        break;
+    case 1: page = buildPluginHome(); break;
     case 2: {
         auto* configPage = new ConfigPage(this);
         connect(configPage, &ConfigPage::rescanRequested, this, &SettingsDialog::rescanRequested);
@@ -363,6 +364,67 @@ void SettingsDialog::ensurePage(int index)
     m_stack->setCurrentIndex(index);
 }
 
+QWidget* SettingsDialog::buildPluginHome()
+{
+    m_pluginStack = new QStackedWidget(this);
+    auto* home = new QWidget(m_pluginStack);
+    auto* layout = new QVBoxLayout(home);
+    layout->setContentsMargins(28, 24, 28, 24);
+    layout->setSpacing(14);
+    auto* title = new QLabel(QStringLiteral("Hotaru 直属插件"), home);
+    QFont titleFont = title->font();
+    titleFont.setPointSizeF(titleFont.pointSizeF() + 5);
+    titleFont.setBold(true);
+    title->setFont(titleFont);
+    layout->addWidget(title);
+
+    const auto card = [layout, home](const QString& name, const QString& description) {
+        auto* frame = new QFrame(home);
+        frame->setFrameShape(QFrame::StyledPanel);
+        auto* body = new QVBoxLayout(frame);
+        body->setContentsMargins(16, 12, 16, 12);
+        auto* heading = new QHBoxLayout;
+        auto* label = new QLabel(name, frame);
+        auto font = label->font();
+        font.setBold(true);
+        label->setFont(font);
+        heading->addWidget(label, 1);
+        heading->addWidget(new QLabel(QStringLiteral("尚未发布"), frame));
+        body->addLayout(heading);
+        auto* detail = new QLabel(description, frame);
+        detail->setWordWrap(true);
+        body->addWidget(detail);
+        layout->addWidget(frame);
+    };
+    card(QStringLiteral("局域网剪贴板共享"),
+         QStringLiteral("在已配对的设备间同步新复制的文本和图片。"));
+    card(QStringLiteral("局域网文件分享"),
+         QStringLiteral("选择要发送的文件或文件夹，由对方确认接收。"));
+    auto* compatibility = new QPushButton(QStringLiteral("ltool 兼容插件"), home);
+    layout->addWidget(compatibility, 0, Qt::AlignLeft);
+    connect(compatibility, &QPushButton::clicked, this, [this] { openCompatibilityPlugins(); });
+    layout->addStretch();
+    m_pluginStack->addWidget(home);
+    return m_pluginStack;
+}
+
+ToolsPage* SettingsDialog::openCompatibilityPlugins()
+{
+    ensurePage(1);
+    if (!m_toolsPage) {
+        auto* panel = new QWidget(m_pluginStack);
+        auto* layout = new QVBoxLayout(panel);
+        auto* back = new QPushButton(QStringLiteral("返回插件首页"), panel);
+        layout->addWidget(back, 0, Qt::AlignLeft);
+        connect(back, &QPushButton::clicked, this, [this] { m_pluginStack->setCurrentIndex(0); });
+        m_toolsPage = new ToolsPage(panel);
+        layout->addWidget(m_toolsPage, 1);
+        m_pluginStack->addWidget(panel);
+    }
+    m_pluginStack->setCurrentIndex(1);
+    return m_toolsPage;
+}
+
 void SettingsDialog::editQuickSearch(const QString& name)
 {
     ensurePage(0);
@@ -375,9 +437,8 @@ void SettingsDialog::editQuickSearch(const QString& name)
 // 返回 false = 那个 id 没加载起来（ToolsPage 里已经写了一条带原因的日志）。
 bool SettingsDialog::showTool(const QString& id, const QString& text)
 {
-    ensurePage(1);             // 「插件商店」那一行
     m_menu->setCurrentRow(1);
-    return m_toolsPage && m_toolsPage->showTool(id, text);
+    return openCompatibilityPlugins()->showTool(id, text);
 }
 
 void SettingsDialog::showEvent(QShowEvent* e)
@@ -404,8 +465,11 @@ void SettingsDialog::openAt(int menuRow, int tab, const QString& toolId)
     m_menu->setCurrentRow(qBound(0, menuRow, m_menu->count() - 1));
     // 顺序是"先展开卡、再挑 tab"：软件那两张页搬进插件之后，那个 QTabWidget 在卡片里面，
     // 反过来写就永远挑不到。
-    if (!toolId.isEmpty() && m_toolsPage)
-        m_toolsPage->showTool(toolId);
+    if (menuRow == 1 && (!toolId.isEmpty() || tab >= 0)) {
+        auto* tools = openCompatibilityPlugins();
+        if (!toolId.isEmpty())
+            tools->showTool(toolId);
+    }
     if (tab >= 0) {
         QWidget* host = m_stack->widget(qBound(0, menuRow, m_stack->count() - 1));
         if (auto* tabs = host ? host->findChild<QTabWidget*>() : nullptr)

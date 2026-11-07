@@ -1,4 +1,5 @@
 #include "PluginHost.h"
+#include "BuildChannel.h"
 
 #include "Utils.h"
 #include "platform/PluginNames.h"
@@ -56,7 +57,8 @@ namespace PluginHost {
 
 QString pluginsDir()
 {
-    return QCoreApplication::applicationDirPath() + QStringLiteral("/ltool-plugins");
+    return QCoreApplication::applicationDirPath()
+        + (BuildChannel::development ? QStringLiteral("/ltool-plugins-dev") : QStringLiteral("/ltool-plugins"));
 }
 
 void reload()

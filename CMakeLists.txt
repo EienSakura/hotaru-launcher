@@ -204,6 +204,8 @@ if(MSVC)
 endif()
 # core-api.h 靠它决定是 dllexport 还是 dllimport（只有编 core 这一份目标定义）
 target_compile_definitions(ltoolcore PRIVATE LTOOL_CORE_BUILD)
+option(HOTARU_DEV_BUILD "构建独立的 Hotaru Windows 开发版" OFF)
+target_compile_definitions(ltoolcore PUBLIC HOTARU_DEV_BUILD=$<BOOL:${HOTARU_DEV_BUILD}>)
 # 界面「关于」那一页显示的就是它（PUBLIC：exe 和插件都拿得到同一个串）。
 # AboutPage.cpp 里没定义就直接 #error，绝不让界面显示一个"忘了改的旧版本"。
 target_compile_definitions(ltoolcore PUBLIC LTOOL_VERSION="${LTOOL_VERSION_STRING}")
@@ -317,10 +319,15 @@ endif()
 qt_add_executable(ltool WIN32
     src/main.cpp
     src/HotaruSelftest.cpp
+    src/HotaruStartupSelftest.cpp
     resources/ltool.rc
 )
 # 保留内部目标与核心DLL名称以兼容上游插件，面向用户的运行文件使用独立品牌。
-set_target_properties(ltool PROPERTIES OUTPUT_NAME Hotaru)
+if(HOTARU_DEV_BUILD)
+    set_target_properties(ltool PROPERTIES OUTPUT_NAME HotaruDev)
+else()
+    set_target_properties(ltool PROPERTIES OUTPUT_NAME Hotaru)
+endif()
 target_compile_definitions(ltool PRIVATE
     HOTARU_VERSION_MAJOR=${PROJECT_VERSION_MAJOR}
     HOTARU_VERSION_MINOR=${PROJECT_VERSION_MINOR}
@@ -347,7 +354,11 @@ if(HOTARU_BUNDLE_PLUGINS)
 include(cmake/ltool-plugin.cmake)
 set(LTOOL_CORE_TARGET ltoolcore)
 set(LTOOL_PLUGIN_OUT ${CMAKE_BINARY_DIR}/plugin-build)
-set(LTOOL_DEPLOY_DIR ${CMAKE_BINARY_DIR}/Release/ltool-plugins)
+if(HOTARU_DEV_BUILD)
+    set(LTOOL_DEPLOY_DIR ${CMAKE_BINARY_DIR}/Release/ltool-plugins-dev)
+else()
+    set(LTOOL_DEPLOY_DIR ${CMAKE_BINARY_DIR}/Release/ltool-plugins)
+endif()
 
 function(ltool_add_tool id cls)
     ltool_add_plugin(${id} ${cls} ${ARGN} plugins/${id}/plugin.json)
