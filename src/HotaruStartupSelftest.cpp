@@ -134,6 +134,22 @@ int runHotaruSearchSelftest()
     }
     check("系统程序扩展名别名排在网页兜底之前", cmdFirst);
 
+    query(QStringLiteral("jtb"));
+    bool clipboardShortcut = false;
+    for (int i = 0; i < window.resultCount(); ++i) {
+        const auto& row = window.resultAt(i);
+        if (!row.isSection && row.actionable) {
+            clipboardShortcut = row.kind == SearchResult::Command
+                && row.target == QStringLiteral("hotaru:clipboard");
+            break;
+        }
+    }
+    check("jtb 置顶当前剪贴板只读快照", clipboardShortcut);
+    query(QStringLiteral("@"));
+    bool noPeerMessage = false;
+    for (int i = 0; i < window.resultCount(); ++i)
+        noPeerMessage |= window.resultAt(i).title == QStringLiteral("没有可发送的已配对设备");
+    check("@ 无设备时显示可执行原因", noPeerMessage);
     auto* list = window.findChild<QListWidget*>(QStringLiteral("list"));
     input->setText(QStringLiteral("旧查询"));
     window.flushSearch();

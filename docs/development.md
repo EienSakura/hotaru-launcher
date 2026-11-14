@@ -93,7 +93,23 @@ cmake --build build/dev --config Release --target ltool --parallel 4
 .\tools\package-dev.ps1 -BuildDirectory build/dev -OutputFile build/Hotaru-dev-x64.zip
 ```
 
-ZIP 中的 `HotaruDev.exe` 使用独立的单实例通道、`data-dev`、`ltool-plugins-dev`、`HotaruDev` 登录项与默认 **Ctrl+Alt+H**，不迁移旧数据，不写资源管理器菜单。开发版测试数据覆盖变量为 `HOTARU_DEV_DATA_DIR`。正式版默认 `HOTARU_DEV_BUILD=OFF`，原来的构建和安装器用法不变。参见[实机测试清单](development-testing.md)。
+每次本机打包同时交付 ZIP 和同名运行目录：`build/Hotaru-dev-x64.zip` 用于传输，`build/Hotaru-dev-x64/HotaruDev.exe` 可以直接运行。目录从本次 ZIP 解压生成。任一输出已存在时，换一个输出名，避免覆盖之前的测试数据。
+
+局域网插件预览使用另一个构建目录，并显式提供项目内的 BoringSSL Release 库：
+
+```powershell
+cmake -S . -B build/lan-preview -G "Visual Studio 17 2022" -A x64 `
+  -DHOTARU_DEV_BUILD=ON -DHOTARU_BUNDLE_PLUGINS=OFF -DHOTARU_LAN_PREVIEW=ON `
+  -DHOTARU_BORINGSSL_SOURCE="$pwd/build/hotaru-local/lan-deps/boringssl-source" `
+  -DHOTARU_BORINGSSL_CRYPTO="$pwd/build/hotaru-local/lan-deps/boringssl/lib/crypto.lib"
+cmake --build build/lan-preview --config Release --target hotaru-lan-selftest ltool
+./tools/package-dev.ps1 -BuildDirectory build/lan-preview `
+  -OutputFile build/Hotaru-lan-preview-x64.zip -IncludeLanPreview
+```
+
+局域网自测使用 `QT_QPA_PLATFORM=offscreen`；双机操作按[局域网预览清单](lan-preview-testing.md)进行。
+
+`HotaruDev.exe` 使用独立的单实例通道、`data-dev`、`ltool-plugins-dev`、`HotaruDev` 登录项与默认 **Ctrl+Alt+H**，不迁移旧数据，不写资源管理器菜单。开发版测试数据覆盖变量为 `HOTARU_DEV_DATA_DIR`。正式版默认 `HOTARU_DEV_BUILD=OFF`，原来的构建和安装器用法不变。参见[实机测试清单](development-testing.md)。
 
 ## 工具插件
 

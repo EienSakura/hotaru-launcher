@@ -1,4 +1,5 @@
 #include "ClipboardStore.h"
+#include "hotaru-native-plugin.h"
 #include "Utils.h"
 
 #include <QApplication>
@@ -201,7 +202,8 @@ void ClipboardStore::capture()
     if (!m_enabled)
         return;
     const QMimeData* mime = QApplication::clipboard()->mimeData();
-    if (!mime)
+    if (!mime || mime->hasFormat(QString::fromLatin1(kHotaruClipboardPrivate)) ||
+        mime->hasFormat(QString::fromLatin1(kHotaruClipboardReceived)))
         return;
 
     Item it;

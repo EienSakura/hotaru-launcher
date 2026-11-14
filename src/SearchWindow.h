@@ -38,6 +38,7 @@ struct SearchResult {
         PinnedGroup,  // 固定面板内部的图标分组：target=groups 中的 id
         PluginEntry,  // 开发环境插件入口
         PluginItem,   // 插件组件（安装/重检）
+        NativePeer,   // 已认证的直属插件设备，Enter 后选择文件发送
         RegIssue,     // 注册表问题（Enter 删除）
         Info,         // 纯信息行，不可激活
     };

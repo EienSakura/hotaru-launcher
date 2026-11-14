@@ -17,6 +17,7 @@
 #include "CaptureHistory.h"
 #include "ConfigPage.h"
 #include "ClipboardStore.h"
+#include "HotaruNativeHost.h"
 #include "DevEnv.h"
 #include "ToolsPage.h"
 #include "PluginHost.h"
@@ -6004,6 +6005,7 @@ int main(int argc, char* argv[])
         unregisterCurrent();
         UnregisterHotKey(nullptr, (int)kCaptureId);
         UnregisterHotKey(nullptr, (int)kRecordId);
+        HotaruNativeHost::stop();
         server.close();
     });
 
@@ -6012,6 +6014,12 @@ int main(int argc, char* argv[])
         QTimer::singleShot(loginStart ? 30000 : 0, &win, [&win] { win.startInitialScan(true); });
         TaskScheduler::instance().start();
         ClipboardStore::instance().start();
+        QTimer::singleShot(loginStart ? 35000 : 0, &app, [&tray] {
+            HotaruNativeHost::start([&tray](QString note) {
+                tray.showMessage(QStringLiteral("Hotaru 局域网文件分享"), note,
+                                 QSystemTrayIcon::Information, 8000);
+            });
+        });
         QTimer::singleShot(loginStart ? 35000 : 0, &app, [] {
             AdBlocker::instance().start();
             PluginHost::startBackground();

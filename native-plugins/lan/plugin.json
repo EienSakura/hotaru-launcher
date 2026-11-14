@@ -1,0 +1,6 @@
+{
+  "Api": 1,
+  "Ids": ["lan-clipboard", "lan-files"],
+  "Channel": "development-preview",
+  "Protocol": "HL01"
+}

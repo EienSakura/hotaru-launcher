@@ -182,6 +182,7 @@ qt_add_library(ltoolcore SHARED
     src/ToolsPage.cpp
     src/PluginHost.cpp
     src/PluginStore.cpp
+    src/HotaruNativeHost.cpp
     src/Firewall.cpp
     src/InfoRow.cpp
     src/ShellMenu.cpp
@@ -205,6 +206,11 @@ endif()
 # core-api.h 靠它决定是 dllexport 还是 dllimport（只有编 core 这一份目标定义）
 target_compile_definitions(ltoolcore PRIVATE LTOOL_CORE_BUILD)
 option(HOTARU_DEV_BUILD "构建独立的 Hotaru Windows 开发版" OFF)
+option(HOTARU_LAN_PREVIEW "构建开发版局域网直属插件预览" OFF)
+if(HOTARU_LAN_PREVIEW AND NOT HOTARU_DEV_BUILD)
+    message(FATAL_ERROR "HOTARU_LAN_PREVIEW 仅支持独立开发版。")
+endif()
+target_compile_definitions(ltoolcore PRIVATE HOTARU_LAN_PREVIEW=$<BOOL:${HOTARU_LAN_PREVIEW}>)
 target_compile_definitions(ltoolcore PUBLIC HOTARU_DEV_BUILD=$<BOOL:${HOTARU_DEV_BUILD}>)
 # 界面「关于」那一页显示的就是它（PUBLIC：exe 和插件都拿得到同一个串）。
 # AboutPage.cpp 里没定义就直接 #error，绝不让界面显示一个"忘了改的旧版本"。
@@ -335,6 +341,10 @@ target_compile_definitions(ltool PRIVATE
 add_dependencies(ltool appicon)
 target_link_libraries(ltool PRIVATE ltoolcore)
 ltool_target_setup(ltool)
+
+if(HOTARU_LAN_PREVIEW)
+    add_subdirectory(native-plugins/lan)
+endif()
 
 # ---- 工具插件：十二个各一个 dll，产出后拷进 exe 旁边的 ltool-plugins\ ----
 #

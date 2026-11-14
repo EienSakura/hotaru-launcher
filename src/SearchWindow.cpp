@@ -14,6 +14,7 @@
 #include "LauncherTheme.h"
 #include "SysTools.h"
 #include "PluginHost.h"
+#include "HotaruNativeHost.h"
 #include "PinnedApps.h"
 #include "LauncherGrid.h"
 #include "LauncherSkin.h"
@@ -1545,6 +1546,62 @@ void SearchWindow::runSearch()
         m_homeScroll->setVisible(false);
 
     m_pageBar->setVisible(false);
+    // 直属剪贴板快捷词是完整词匹配，结果固定插在最前面；它只读当前系统快照。
+    const QString clipboardAlias = HotaruNativeHost::clipboardSearchAlias().trimmed().toLower();
+    if (!clipboardAlias.isEmpty() && low == clipboardAlias) {
+        addSection(QStringLiteral("── 局域网剪贴板 ──"));
+        const HotaruClipboardSnapshot snapshot = HotaruNativeHost::clipboardSnapshot();
+        SearchResult clip;
+        clip.kind = SearchResult::Command;
+        clip.target = QStringLiteral("hotaru:clipboard");
+        clip.title = QStringLiteral("当前共享剪贴板");
+        if (snapshot.kind == HotaruClipboardSnapshot::Text) {
+            clip.subtitle = snapshot.textPreview.isEmpty()
+                ? QStringLiteral("文本（空白）")
+                : QStringLiteral("文本 · %1 字符 · %2").arg(snapshot.textPreview, snapshot.connectionState);
+            clip.icon = letterIcon(QStringLiteral("文"), QColor(66, 142, 204));
+        } else if (snapshot.kind == HotaruClipboardSnapshot::Image && !snapshot.image.isNull()) {
+            clip.subtitle = QStringLiteral("图片 · %1×%2 · %3 字节 · %4")
+                .arg(snapshot.image.width()).arg(snapshot.image.height())
+                .arg(snapshot.bytes).arg(snapshot.connectionState);
+            clip.icon = QIcon(QPixmap::fromImage(snapshot.image.scaled(40, 40, Qt::KeepAspectRatio, Qt::SmoothTransformation)));
+        } else {
+            clip.subtitle = QStringLiteral("剪贴板为空 · %1").arg(snapshot.connectionState.isEmpty()
+                ? QStringLiteral("局域网剪贴板未启用") : snapshot.connectionState);
+            clip.icon = letterIcon(QStringLiteral("空"), QColor(128, 128, 128));
+        }
+        addItem(clip);
+    }
+
+    // @ 只列出已认证且启用文件分享的设备；此分支不启动文件索引，避免异步结果覆盖设备选择。
+    if (low == QStringLiteral("@") || low.startsWith(QStringLiteral("@"))) {
+        const QString prefix = q.mid(1).trimmed();
+        addSection(QStringLiteral("── 局域网文件发送 ──"));
+        const auto devices = HotaruNativeHost::peers(kHotaruFeatureFiles);
+        int added = 0;
+        for (const HotaruNativePeer& peer : devices) {
+            if (!prefix.isEmpty() && !peer.name.startsWith(prefix, Qt::CaseInsensitive))
+                continue;
+            SearchResult item;
+            item.kind = SearchResult::NativePeer;
+            item.title = peer.name.isEmpty() ? QStringLiteral("未命名设备") : peer.name;
+            item.subtitle = QStringLiteral("%1 · 已配对 · 选择文件或文件夹发送").arg(peer.address);
+            item.target = QString::fromLatin1(peer.id.toBase64());
+            item.icon = letterIcon(QStringLiteral("发"), QColor(46, 160, 120));
+            addItem(item);
+            ++added;
+        }
+        if (!added) {
+            SearchResult empty;
+            empty.kind = SearchResult::Info;
+            empty.actionable = false;
+            empty.title = QStringLiteral("没有可发送的已配对设备");
+            empty.subtitle = QStringLiteral("请先在局域网文件分享设置中启用并完成配对。");
+            addItem(empty);
+        }
+        rebuildList();
+        return;
+    }
     // 搜索到的工具继续使用现有 DLL 插件入口。
     // 索引指的是 PluginHost::scan() 里那一条 —— 九个自带工具现在也是插件，这里没有特判。
     const auto addToolRow = [this](int i) {
@@ -2219,7 +2276,11 @@ void SearchWindow::activateRow(int row)
         break;
     }
     case SearchResult::Command: {
-        if (r.target == "rescan") {
+        if (r.target == QLatin1String("hotaru:clipboard")) {
+            const auto snapshot = HotaruNativeHost::clipboardSnapshot();
+            const QString state = snapshot.connectionState.isEmpty() ? QStringLiteral("直属插件未启用") : snapshot.connectionState;
+            setStatus(QStringLiteral("当前剪贴板快照已读取 · %1").arg(state));
+        } else if (r.target == "rescan") {
             setStatus("正在重新扫描，完成后会自动刷新…");
             startScan(false, true);
         } else if (r.target == QLatin1String("power:hibernate")
@@ -2255,6 +2316,38 @@ void SearchWindow::activateRow(int row)
                 hide();
             }
         }
+        break;
+    }
+    case SearchResult::NativePeer: {
+        const QByteArray peerId = QByteArray::fromBase64(r.target.toLatin1());
+        if (peerId.isEmpty()) {
+            setStatus(QStringLiteral("设备标识无效，无法发送文件。"));
+            break;
+        }
+        QMessageBox chooser(QMessageBox::Question, QStringLiteral("发送到 %1").arg(r.title),
+                            QStringLiteral("请选择要发送的内容类型。"), QMessageBox::NoButton, this);
+        auto* fileButton = chooser.addButton(QStringLiteral("选择文件"), QMessageBox::AcceptRole);
+        auto* folderButton = chooser.addButton(QStringLiteral("选择文件夹"), QMessageBox::AcceptRole);
+        chooser.addButton(QStringLiteral("取消"), QMessageBox::RejectRole);
+        chooser.exec();
+        QStringList paths;
+        if (chooser.clickedButton() == fileButton) {
+            paths = QFileDialog::getOpenFileNames(this, QStringLiteral("选择要发送的文件"));
+        } else if (chooser.clickedButton() == folderButton) {
+            const QString folder = QFileDialog::getExistingDirectory(this, QStringLiteral("选择要发送的文件夹"));
+            if (!folder.isEmpty()) paths << folder;
+        }
+        if (paths.isEmpty()) {
+            setStatus(QStringLiteral("已取消文件发送。"));
+            break;
+        }
+        QString error;
+        if (!HotaruNativeHost::sendFiles(peerId, paths, error)) {
+            setStatus(error.isEmpty() ? QStringLiteral("文件发送失败。") : error);
+            break;
+        }
+        setStatus(QStringLiteral("已提交 %1 个项目到 %2。").arg(paths.size()).arg(r.title));
+        hide();
         break;
     }
     case SearchResult::PluginEntry: {
