@@ -3067,8 +3067,8 @@ int main(int argc, char* argv[])
                 for (int i = 0; i < menu->count(); ++i)
                     names << menu->item(i)->text();
             }
-            say("菜单正好四行、顺序是 快捷搜索/插件商店/配置/关于",
-                names.join(QStringLiteral(" / ")) == QStringLiteral("快捷搜索 / 插件商店 / 配置 / 关于"),
+            say("菜单正好四行、顺序是 快捷搜索/插件/配置/关于",
+                names.join(QStringLiteral(" / ")) == QStringLiteral("快捷搜索 / 插件 / 配置 / 关于"),
                 names.join(QStringLiteral(" / ")));
             auto* stack = dlg.findChild<QStackedWidget*>();
             int built = 0;
@@ -6889,9 +6889,6 @@ int main(int argc, char* argv[])
                              : QStringLiteral("无"))
                     .arg(backBtn() && backBtn()->isVisible() ? 1 : 0);
             };
-            eq("起点：那一面卡片墙在前，返回那颗藏着", where(),
-               "index=0 类=QScrollArea 返回可见=0");
-
             const PluginHost::Meta* registryMeta = PluginHost::meta(QStringLiteral("registry"));
             if (!registryMeta || !registryMeta->ok() || !QFileInfo::exists(registryMeta->file)) {
                 std::printf("SKIP storeexit：本次构建未提供 registry 插件，跳过依赖插件卡片的出口回归\n");
@@ -6900,6 +6897,9 @@ int main(int argc, char* argv[])
                 app.quit();
                 return;
             }
+            eq("起点：那一面卡片墙在前，返回那颗藏着", where(),
+               "index=0 类=QScrollArea 返回可见=0");
+
             QPointer<QFrame> card = cardNamed(QStringLiteral("注册表分析"));
             check("那张「注册表分析」的卡画出来了", card != nullptr,
                   card ? QStringLiteral("yes") : QStringLiteral("no"));
