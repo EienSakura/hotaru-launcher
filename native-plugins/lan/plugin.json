@@ -3,10 +3,10 @@
   "Name": "局域网连接",
   "Desc": "配对并管理局域网设备。",
   "Category": "service",
-  "Version": "1.0.0",
+  "Version": "1.0.1",
   "Abi": "@HOTARU_PLUGIN_ABI@",
   "Id": "lan-core",
   "Requires": "",
-  "Channel": "development-preview",
+  "Channel": "stable",
   "Protocol": "HL02"
 }

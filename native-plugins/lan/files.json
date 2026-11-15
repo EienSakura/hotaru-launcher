@@ -3,9 +3,9 @@
   "Name": "局域网文件分享",
   "Desc": "选择文件或文件夹发给已配对设备。",
   "Category": "feature",
-  "Version": "1.0.0",
+  "Version": "1.0.1",
   "Abi": "@HOTARU_PLUGIN_ABI@",
   "Id": "lan-files",
   "Requires": "lan-core",
-  "Channel": "development-preview"
+  "Channel": "stable"
 }

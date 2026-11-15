@@ -634,11 +634,6 @@ QWidget* SettingsDialog::buildPluginPage(QWidget* parent, HotaruPluginRepository
             actions->addStretch();
             actions->addWidget(action);
             body->addLayout(actions);
-            if (!Repo::installable(entry, BuildChannel::development)) {
-                action->setText(QStringLiteral("仅开发版可从仓库安装"));
-                action->setEnabled(false);
-                return card;
-            }
             const auto current = Repo::desired().value(id);
             const bool same = current.source == "official" && Repo::sameVersion(current.entry.version, entry.version);
             action->setEnabled(!same && !client->busy() && client->catalog().expires > QDateTime::currentDateTimeUtc());
