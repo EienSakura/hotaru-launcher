@@ -4,6 +4,9 @@
 #include "platform/Launch.h"
 
 #include <QProcess>
+#include <QDir>
+#include <QFileInfo>
+#include <algorithm>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -22,6 +25,18 @@ AppEntry tool(const QString& name, const QString& target, const QString& args = 
     AppEntry e;
     e.name = name;
     e.target = target;
+#ifdef _WIN32
+    if (!target.startsWith(QStringLiteral("ms-settings:"))) {
+        static const QString system = [] {
+            wchar_t path[MAX_PATH];
+            const UINT size = GetSystemDirectoryW(path, MAX_PATH);
+            return size && size < MAX_PATH ? QString::fromWCharArray(path, size) : QString();
+        }();
+        e.target = system.isEmpty() ? QString() : QDir(system).filePath(target);
+        if (!QFileInfo::exists(e.target))
+            e.target.clear();
+    }
+#endif
     e.args = args;
     e.category = "system";
     return e;
@@ -60,7 +75,11 @@ QVector<AppEntry> systemTools()
       << tool(QStringLiteral("用户账户"), QStringLiteral("nusrmgr.cpl"));
 
     // 管理单元与系统 exe（这些要多数一次管理员提权，ShellExecute 会照常弹 UAC）
-    v << tool(QStringLiteral("任务管理器"), QStringLiteral("taskmgr.exe"))
+    v << tool(QStringLiteral("计算器"), QStringLiteral("calc.exe"))
+      << tool(QStringLiteral("命令提示符"), QStringLiteral("cmd.exe"))
+      << tool(QStringLiteral("Windows PowerShell"), QStringLiteral("WindowsPowerShell/v1.0/powershell.exe"))
+      << tool(QStringLiteral("记事本"), QStringLiteral("notepad.exe"))
+      << tool(QStringLiteral("任务管理器"), QStringLiteral("taskmgr.exe"))
       << tool(QStringLiteral("服务"), QStringLiteral("services.msc"))
       << tool(QStringLiteral("设备管理器"), QStringLiteral("devmgmt.msc"))
       << tool(QStringLiteral("注册表编辑器"), QStringLiteral("regedit.exe"))
@@ -75,7 +94,23 @@ QVector<AppEntry> systemTools()
       << tool(QStringLiteral("防火墙高级安全"), QStringLiteral("wf.msc"))
       << tool(QStringLiteral("磁盘清理"), QStringLiteral("cleanmgr.exe"));
 
+    v.erase(std::remove_if(v.begin(), v.end(), [](const AppEntry& e) { return e.target.isEmpty(); }), v.end());
     return v;
+}
+
+bool aliasMatches(const AppEntry& app, const QString& query)
+{
+    if (app.category != "system")
+        return false;
+    const QFileInfo target(app.target);
+    const QString name = target.completeBaseName().toLower();
+    if (query == app.name.toLower() || query == name || query == target.fileName().toLower())
+        return true;
+    return (name == "calc" && query == "calculator")
+        || (name == "cmd" && (query == "命令行" || query == "command prompt"))
+        || (name == "powershell" && query == "系统终端")
+        || (name == "notepad" && query == "文本编辑器")
+        || (name == "taskmgr" && query == "task manager");
 }
 
 namespace {

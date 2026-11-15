@@ -1,0 +1,5 @@
+[
+  {"metadata":"lan-core.metadata.json","tag":"lan-core-v1.0.0","host":{"min":"1.0.0","max":"2.0.0"}},
+  {"metadata":"lan-clipboard.metadata.json","tag":"lan-clipboard-v1.0.0","host":{"min":"1.0.0","max":"2.0.0"}},
+  {"metadata":"lan-files.metadata.json","tag":"lan-files-v1.0.0","host":{"min":"1.0.0","max":"2.0.0"}}
+]

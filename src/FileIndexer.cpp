@@ -277,6 +277,12 @@ QVector<FileIndexer::QuickRoot> FileIndexer::quickRoots()
     return roots;
 }
 
+bool FileIndexer::restoreCachedSnapshot()
+{
+    QSettings cfg(Utils::dataDir() + "/config.ini", QSettings::IniFormat);
+    return !m_running.loadRelaxed() && cfg.value("index/deep", true).toBool() && mapSnapshot();
+}
+
 void FileIndexer::reindexAsync(bool forceDeep)
 {
     if (!m_running.testAndSetRelaxed(0, 1))
@@ -827,8 +833,7 @@ void FileIndexer::applyUsnDelete(quint64 frn)
 //      出现在快索引和深索引里，快索引排前面，深索引那份被丢），所以真正要发出去的
 //      深索引条目一定在深索引前 2×limit 名里；而"全局某桶前 K 名"必然落在"各段同桶
 //      前 K 名"的并集里，所以并行分段各自截断再并起来也等价。
-//   ② 桶内比大小不造 QString：名字长度 = 路径的 UTF-16 单元数 - nameStart（老写法就是
-//      path.mid(nameStart)，nameStart 是**字节**偏移却被当字符下标用，中文路径下名字
+//   ② nameStart 是 UTF-8 字节偏移。先从字节池截取文件名，再用解码后的长度排序。
 //      会偏长 —— 那是老行为，这里照抄，不许顺手修），路径按 UTF-8 字节序比：UTF-8 的
 //      字节序就是码点序，码点序就是 BMP 字符的 UTF-16 序。只有两边名字长度相同且任一
 //      条含 4 字节序列（emoji 那类，UTF-16 里是代理对，会和码点序错开）才退回 QString 比。
@@ -839,7 +844,7 @@ namespace {
 struct DeepCand {
     const char* path = nullptr;   // 指向映射视图里的路径 UTF-8 本体（不拷贝）
     int len = 0;                  // 路径字节数
-    int nameStart = 0;            // 老写法那个"字节偏移当字符下标"的值
+    int nameStart = 0;            // 文件名在 UTF-8 路径里的字节偏移
     int nameSize = 0;             // 老写法算出来的名字 QString 长度
     bool isDir = false;
     bool astral = false;          // 路径里有 4 字节 UTF-8 序列
@@ -961,7 +966,12 @@ struct Seg {
 
 QVector<FileEntry> FileIndexer::search(const QString& query, int limit) const
 {
-    QVector<FileEntry> res;
+    return search(query, limit, 0);
+}
+
+QVector<FileEntry> FileIndexer::search(const QString& query, int limit, int reserveFolders) const
+{
+    QVector<FileEntry> res, dirs;
     const QString q = query.trimmed();
     if (q.isEmpty() || limit <= 0)
         return res;
@@ -1022,6 +1032,8 @@ QVector<FileEntry> FileIndexer::search(const QString& query, int limit) const
                     memcpy(&de, entries + qint64(i) * kPackedEntrySize, kPackedEntrySize);
                     if (m_removed.contains(de.frn))
                         continue;
+                    if (de.nameStart >= de.len || quint64(de.offset) + de.len > v.arenaLen)
+                        continue;
                     const int nameLen = int(de.len) - int(de.nameStart);
                     const int idx = findCi(arena + de.offset + de.nameStart, nameLen, ne, neLen);
                     if (idx < 0)
@@ -1032,9 +1044,10 @@ QVector<FileEntry> FileIndexer::search(const QString& query, int limit) const
                     c.nameStart = int(de.nameStart);
                     c.isDir = de.isDir != 0;
                     bool astral = false;
-                    c.nameSize = qMax(0, utf16LenOf(c.path, c.len, &astral) - c.nameStart);
+                    utf16LenOf(c.path, c.len, &astral);
                     c.astral = astral;
                     const QString name = QString::fromUtf8(arena + de.offset + de.nameStart, nameLen);
+                    c.nameSize = name.size();
                     const int bucket = fileBucket(name, q, c.isDir);
                     if (bucket >= 0)
                         pushBounded(me[bucket], c, cap);
@@ -1055,6 +1068,8 @@ QVector<FileEntry> FileIndexer::search(const QString& query, int limit) const
     // 增量新增那批（几千条量级，留在本线程扫）
     const char* addArena = m_addArena.constData();
     for (const FileDeepEntry& de : m_add) {
+        if (de.nameStart >= de.len || quint64(de.offset) + de.len > quint64(m_addArena.size()))
+            continue;
         const char* nameStart = addArena + de.offset + de.nameStart;
         const int nameLen = int(de.len) - int(de.nameStart);
         const int idx = findCi(nameStart, nameLen, ne, neLen);
@@ -1066,9 +1081,10 @@ QVector<FileEntry> FileIndexer::search(const QString& query, int limit) const
         c.nameStart = int(de.nameStart);
         c.isDir = de.isDir != 0;
         bool astral = false;
-        c.nameSize = qMax(0, utf16LenOf(c.path, c.len, &astral) - c.nameStart);
+        utf16LenOf(c.path, c.len, &astral);
         c.astral = astral;
         const QString name = QString::fromUtf8(nameStart, nameLen);
+        c.nameSize = name.size();
         const int bucket = fileBucket(name, q, c.isDir);
         if (bucket >= 0)
             pushBounded(db[bucket], c, cap);
@@ -1076,6 +1092,11 @@ QVector<FileEntry> FileIndexer::search(const QString& query, int limit) const
 
     // ---- 按 (文件类型, 名称相关度, 来源, 名字长度, 路径) 发出去，边发边按路径去重 ----
     QSet<QString> seen;
+    const auto emitHit = [&](FileEntry entry) {
+        auto& out = entry.isDir ? dirs : res;
+        if (out.size() < limit)
+            out.append(std::move(entry));
+    };
     for (int score = 0; score < kFileBucketCount; ++score) {
         // 快索引只作为同一相关度桶内的稳定新鲜度优先级，不能把普通快索引文件
         // 整体排到深索引 exe 前面。
@@ -1086,9 +1107,7 @@ QVector<FileEntry> FileIndexer::search(const QString& query, int limit) const
                     if (seen.contains(key))
                         continue;
                     seen.insert(key);
-                    res.append(*e);
-                    if (res.size() >= limit)
-                        return res;
+                    emitHit(*e);
                 }
             } else {
                 for (const DeepCand& c : db[score]) {
@@ -1097,14 +1116,62 @@ QVector<FileEntry> FileIndexer::search(const QString& query, int limit) const
                     if (seen.contains(key))
                         continue;
                     seen.insert(key);
-                    res.append({path.mid(c.nameStart), path, c.isDir});
-                    if (res.size() >= limit)
-                        return res;
+                    emitHit({QString::fromUtf8(c.path + c.nameStart, c.len - c.nameStart), path, c.isDir});
                 }
             }
         }
     }
+    const auto reserved = qMin<qsizetype>(qBound(0, reserveFolders, limit), dirs.size());
+    if (res.size() > limit - reserved)
+        res.resize(limit - reserved);
+    for (const FileEntry& entry : std::as_const(dirs)) {
+        if (res.size() == limit)
+            break;
+        res.append(entry);
+    }
     return res;
+}
+
+bool FileIndexer::searchSelftest()
+{
+    FileIndexer fixture;
+    const QString base = QStringLiteral("D:/中文多级目录/创作工具箱/");
+    for (int i = 0; i < 12; ++i)
+        fixture.m_entries.append({QStringLiteral("创作%1.txt").arg(i), base + QString::number(i) + ".txt", false});
+    fixture.m_entries.append({QStringLiteral("创作目录"), base + QStringLiteral("创作目录"), true});
+    const QString path = base + QStringLiteral("创作灵感🎵.wav");
+    const auto utf8 = path.toUtf8();
+    const auto name = QFileInfo(path).fileName();
+    FileDeepEntry delta;
+    delta.len = utf8.size();
+    delta.nameStart = delta.len - name.toUtf8().size();
+    delta.frn = 1;
+    fixture.m_addArena = utf8;
+    fixture.m_add.append(delta);
+    const auto incremental = fixture.search(QStringLiteral("创作灵感"), 8);
+    bool ok = incremental.size() == 1 && incremental[0].name == name && incremental[0].path == path;
+    PackedDeepEntry packed{};
+    packed.len = delta.len;
+    packed.nameStart = delta.nameStart;
+    packed.frn = 1;
+    QByteArray snapshot(reinterpret_cast<const char*>(&packed), kPackedEntrySize);
+    snapshot.append(utf8);
+    fixture.m_add.clear();
+    fixture.m_mapView = snapshot.data();
+    MappedVol volume;
+    volume.count = 1;
+    volume.arenaOff = kPackedEntrySize;
+    volume.arenaLen = utf8.size();
+    fixture.m_base.append(volume);
+    const auto mapped = fixture.search(QStringLiteral("创作灵感"), 8);
+    ok = ok && mapped.size() == 1 && mapped[0].name == name && mapped[0].path == path;
+    const auto combined = fixture.search(QStringLiteral("创作"), 8, 2);
+    ok = ok && combined.size() == 8 && std::any_of(combined.begin(), combined.end(),
+        [](const FileEntry& entry) { return entry.isDir; });
+    // 测试借用内存，不交给 Windows 的映射释放接口。
+    fixture.m_mapView = nullptr;
+    fixture.m_base.clear();
+    return ok;
 }
 
 // ---------- 快索引实时监听 ----------

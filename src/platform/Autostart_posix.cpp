@@ -89,16 +89,24 @@ QString autostartEntry(const QString& exePath)
 
 void setAutostart(bool on)
 {
-    if (!on) {
-        QFile::remove(autostartFile());
-        return;
-    }
-    QDir().mkpath(autostartDir());
+    setAutostart(on, nullptr);
+}
+
+bool setAutostart(bool on, QString* error)
+{
     QFile f(autostartFile());
-    if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate))
-        return;
-    f.write(autostartEntry(QCoreApplication::applicationFilePath()).toUtf8());
-    f.close();
+    if (!on) {
+        if (!f.exists() || f.remove())
+            return true;
+    } else {
+        QDir().mkpath(autostartDir());
+        const auto data = autostartEntry(QCoreApplication::applicationFilePath()).toUtf8();
+        if (f.open(QIODevice::WriteOnly | QIODevice::Truncate) && f.write(data) == data.size() && f.flush())
+            return true;
+    }
+    if (error)
+        *error = f.errorString();
+    return false;
 }
 
 bool autostartEnabled() { return QFileInfo::exists(autostartFile()); }

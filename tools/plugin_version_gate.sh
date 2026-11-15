@@ -50,10 +50,23 @@ vcmp() {
     }'
 }
 
+# Git 不跟踪空目录，移除插件后本机可能还留着空壳或忽略的构建文件。
+# 仍有源码时缺清单要报错；未暂存的删除也按工作树实际存在的文件判断。
+has_plugin_sources() {
+    local path
+    while IFS= read -r -d '' path; do
+        if [ -f "$path" ] || [ -L "$path" ]; then
+            return 0
+        fi
+    done < <(git ls-files --cached --others --exclude-standard -z -- "$1")
+    return 1
+}
+
 total=0 new=0 quiet=0 needs=0 back=0
 for d in plugins/*/; do
     id=$(basename "$d")
     if [ ! -f "${d}plugin.json" ]; then
+        has_plugin_sources "$d" || continue
         echo "GATE_NO_MANIFEST $id —— 目录里没 plugin.json，闸没法认它的号"
         needs=$((needs + 1))
         continue

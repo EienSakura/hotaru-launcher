@@ -1,4 +1,6 @@
 #include "PluginHost.h"
+#include "BuildChannel.h"
+#include "PluginStore.h"
 
 #include "Utils.h"
 #include "platform/PluginNames.h"
@@ -14,6 +16,8 @@
 #include <QPointer>
 #include <QPluginLoader>
 #include <QWidget>
+#include <algorithm>
+#include <utility>
 
 #ifdef Q_OS_WIN
 #include <windows.h>        // SEH：LONG / PEXCEPTION_POINTERS / GetExceptionInformation
@@ -25,6 +29,11 @@ QVector<PluginHost::Meta> g_metas;
 QHash<QString, QPluginLoader*> g_loaders;      // 只装不卸：卸载会留下悬空的 QWidget
 QHash<QString, LToolPlugin*> g_plugins;
 QHash<QString, QPointer<QWidget>> g_pages;
+struct ShortcutSubscriber {
+    QPointer<QObject> context;
+    std::function<void()> callback;
+};
+QVector<ShortcutSubscriber> g_shortcutSubscribers;
 // ^ 用 QPointer 不是讲究：这些页的命**不在宿主手里** —— 它们是 `createPage(parent)` 时交给
 // 调用方那棵树去拥有的（`ToolsPage` 重排卡片墙那一格会把它摘掉的那颗 deleteLater 掉）。
 // 裸指针缓存的话，下一次 `page(id)` 就把一块已经释放的 QWidget 发出去，
@@ -35,6 +44,7 @@ QHash<QString, QPointer<QWidget>> g_pages;
 // 导出面对不上，LoadLibrary 直接失败。谎报成"缺文件"会让人去装第二遍。
 QHash<QString, QString> g_loadErrors;
 bool g_scanned = false;
+QString testDirectory;
 
 QString str(const QJsonObject& o, const char* key)
 {
@@ -54,9 +64,17 @@ QJsonObject metaOf(const QJsonObject& md)
 
 namespace PluginHost {
 
+void setPluginDirectoryForSelftest(const QString& path)
+{
+    testDirectory = path;
+    g_metas.clear();
+    g_scanned = false;
+}
 QString pluginsDir()
 {
-    return QCoreApplication::applicationDirPath() + QStringLiteral("/ltool-plugins");
+    if (!testDirectory.isEmpty()) return testDirectory;
+    return QCoreApplication::applicationDirPath()
+        + (BuildChannel::development ? QStringLiteral("/ltool-plugins-dev") : QStringLiteral("/ltool-plugins"));
 }
 
 void reload()
@@ -64,6 +82,12 @@ void reload()
     g_metas.clear();
     g_scanned = false;
     scan();
+    prepareShortcuts();
+    g_shortcutSubscribers.erase(std::remove_if(g_shortcutSubscribers.begin(), g_shortcutSubscribers.end(),
+        [](const auto& listener) { return !listener.context; }), g_shortcutSubscribers.end());
+    const auto listeners = g_shortcutSubscribers;
+    for (const auto& listener : listeners)
+        if (listener.context) listener.callback();
 }
 
 const QVector<Meta>& scan()
@@ -76,6 +100,8 @@ const QVector<Meta>& scan()
         return g_metas;
     const auto files = dir.entryList(Platform::pluginFileGlobs(), QDir::Files, QDir::Name);
     for (const QString& f : files) {
+        if (isRetired(Platform::pluginIdOf(f)))
+            continue;
         const QString path = dir.absoluteFilePath(f);
         Meta m;
         m.file = path;
@@ -89,6 +115,8 @@ const QVector<Meta>& scan()
         }
         const QJsonObject meta = metaOf(md);
         m.id = str(meta, "Id");
+        if (isRetired(m.id))
+            continue;
         m.name = str(meta, "Name");
         m.desc = str(meta, "Desc");
         m.version = str(meta, "Version");
@@ -129,7 +157,7 @@ const QVector<Meta>& scan()
 
 LToolPlugin* plugin(const QString& id)
 {
-    if (isDisabled(id)) {
+    if (isRetired(id) || isDisabled(id)) {
         g_loadErrors.insert(id, QStringLiteral("插件已禁用"));
         return nullptr;
     }
@@ -449,6 +477,44 @@ bool isDisabled(const QString& id)
         }
     }
     return false;
+}
+
+bool isRetired(const QString& id)
+{
+    return id.compare(QLatin1String("clipboard"), Qt::CaseInsensitive) == 0;
+}
+
+const QVector<Shortcut>& shortcuts()
+{
+    static const QVector<Shortcut> commands = {
+        {QStringLiteral("json"), QStringLiteral("JSON 格式化"), {QStringLiteral("json")}, true, true},
+        {QStringLiteral("base64"), QStringLiteral("Base64 编解码"), {QStringLiteral("b64"), QStringLiteral("base64")}, true, true},
+        {QStringLiteral("user"), QStringLiteral("Windows 用户名"), {QStringLiteral("windows")}},
+        {QStringLiteral("registry"), QStringLiteral("注册表分析"), {QStringLiteral("reg")}},
+    };
+    return commands;
+}
+
+bool shortcutAvailable(const QString& id)
+{
+    const auto* entry = meta(id);
+    return entry && entry->ok() && !isDisabled(id) && g_plugins.contains(id) &&
+        !PluginStore::pendingRemoves().contains(QFileInfo(entry->file).fileName());
+}
+
+void prepareShortcuts()
+{
+    const auto pending = PluginStore::pendingRemoves();
+    for (const auto& command : shortcuts()) {
+        const auto* entry = meta(command.id);
+        if (entry && entry->ok() && !pending.contains(QFileInfo(entry->file).fileName()))
+            plugin(command.id);
+    }
+}
+
+void subscribeShortcutsChanged(QObject* context, std::function<void()> callback)
+{
+    g_shortcutSubscribers.push_back({context, std::move(callback)});
 }
 
 bool feed(const QString& id, const QString& text)

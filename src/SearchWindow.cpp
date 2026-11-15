@@ -1,18 +1,18 @@
 #include "SearchWindow.h"
+#include "BuildChannel.h"
 #include "platform/ProcInfo.h"
 #include "platform/Launch.h"
 #include "platform/Paths.h"
 
 #include "CaptureHistory.h"
 #include "ClipboardStore.h"
-#include "DevEnv.h"
-#include "EnvPath.h"
 #include "FileTools.h"
 #include "FileIndexer.h"
 #include "SettingsDialog.h"
 #include "LauncherTheme.h"
 #include "SysTools.h"
 #include "PluginHost.h"
+#include "HotaruNativeHost.h"
 #include "PinnedApps.h"
 #include "LauncherGrid.h"
 #include "LauncherSkin.h"
@@ -55,6 +55,9 @@
 #include <QListWidget>
 #include <QMenu>
 #include <QMessageBox>
+#include <QTextLayout>
+#include <QToolTip>
+#include <utility>
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPainterPath>
@@ -147,6 +150,19 @@ bool hasResultActions(const SearchResult& r) {return r.kind==SearchResult::App |
 
 constexpr int kWindowWidth = 980;
 constexpr int kRowHeight = 54;
+constexpr int kClipboardRowPadding = 6;
+
+QFont clipboardMetaFont(QFont font)
+{
+    font.setPointSizeF(8.5);
+    font.setBold(false);
+    return font;
+}
+
+bool isClipboardEntry(const QString& target)
+{
+    return target.startsWith(QLatin1String("clip:item:")) || target.startsWith(QLatin1String("clip:live:"));
+}
 constexpr int kSectionHeight = 28;
 constexpr int kMaxVisibleRows = 12;   // 空查询的常用面板有 5 节，9 行只够看到两节
 
@@ -225,6 +241,44 @@ public:
         p->setFont(f);
         p->setPen(Theme::launcherColor(r.actionable ? "text" : "dim"));
         const QFontMetrics tfm(f);
+        if (isClipboardEntry(r.target)) {
+            const auto metaFont = clipboardMetaFont(opt.font);
+            const QFontMetrics metaMetrics(metaFont);
+            const int textX = rr.left() + 48;
+            const int textWidth = qMax(1, rr.width() - 60);
+            QString preview = r.title;
+            preview.replace(QLatin1Char('\n'), QChar::LineSeparator);
+            QTextLayout text(preview, f);
+            QTextOption option;
+            option.setWrapMode(QTextOption::WrapAtWordBoundaryOrAnywhere);
+            text.setTextOption(option);
+            text.beginLayout();
+            auto first = text.createLine();
+            if (first.isValid()) {
+                first.setLineWidth(textWidth);
+                const int offset = first.textLength();
+                const bool twoLines = offset < preview.size();
+                const int previewHeight = tfm.height() * (twoLines ? 2 : 1);
+                const int blockHeight = previewHeight + 2 + metaMetrics.height();
+                const int top = rr.top() + qMax(0, (rr.height() - blockHeight) / 2);
+                const QRect previewRect(textX, top, textWidth, previewHeight);
+                p->save();
+                p->setClipRect(previewRect, Qt::IntersectClip);
+                first.draw(p, QPointF(textX, top));
+                if (twoLines)
+                    p->drawText(textX, top + tfm.height() + tfm.ascent(),
+                                tfm.elidedText(preview.mid(offset).simplified(), Qt::ElideRight, textWidth));
+                p->restore();
+                p->setFont(metaFont);
+                p->setPen(Theme::launcherColor("muted"));
+                const QRect metaRect(textX, top + previewHeight + 2, textWidth, metaMetrics.height());
+                p->drawText(metaRect, Qt::AlignLeft | Qt::AlignVCenter,
+                            metaMetrics.elidedText(r.subtitle, Qt::ElideLeft, textWidth));
+            }
+            text.endLayout();
+            p->restore();
+            return;
+        }
         p->drawText(QRect(rr.left() + 48, rr.top() + 6, rr.width() - 58-actionWidth, 20),
                     Qt::AlignVCenter,
                     tfm.elidedText(r.title, Qt::ElideRight, rr.width() - 58-actionWidth));
@@ -234,7 +288,7 @@ public:
         p->setFont(f);
         p->setPen(Theme::launcherColor("muted"));
         const QFontMetrics sfm(f);
-        p->drawText(QRect(rr.left() + 48, rr.top() + 29, rr.width() - 58-actionWidth, 16),
+        p->drawText(QRect(rr.left() + 48, rr.bottom() - 18, rr.width() - 58-actionWidth, 16),
                     Qt::AlignVCenter,
                     sfm.elidedText(r.subtitle, Qt::ElideMiddle, rr.width() - 58-actionWidth));
         p->restore();
@@ -243,7 +297,16 @@ public:
     QSize sizeHint(const QStyleOptionViewItem& opt, const QModelIndex& index) const override
     {
         const int i = index.data(Qt::UserRole).toInt();
-        return {0, i < 0 ? kSectionHeight : kRowHeight};
+        if (i < 0) return {0, kSectionHeight};
+        const auto& target = m_w->resultAt(i).target;
+        if (!isClipboardEntry(target))
+            return {0, kRowHeight};
+        QFont titleFont = opt.font;
+        titleFont.setPointSizeF(10.5);
+        titleFont.setBold(true);
+        // 两行内容之外始终为来源和时间留一行，避免缩放后底部被裁掉。
+        return {0, qMax(kRowHeight, 2 * QFontMetrics(titleFont).height() +
+                        QFontMetrics(clipboardMetaFont(opt.font)).height() + 2 + 2 * kClipboardRowPadding)};
     }
 
 private:
@@ -289,6 +352,8 @@ QString usageKey(const QString& lnkPath, const QString& target)
 
 int scoreApp(const AppEntry& a, const QString& low)
 {
+    if (SysTools::aliasMatches(a, low))
+        return 0;
     const QString n = a.name.toLower();
     if (n.startsWith(low))
         return 0;
@@ -319,7 +384,7 @@ int scoreApp(const AppEntry& a, const QString& low)
 SearchWindow::SearchWindow(QWidget* parent)
     : QWidget(parent)
 {
-    setWindowTitle(QStringLiteral("萤 Hotaru 搜索"));
+    setWindowTitle(BuildChannel::displayName() + QStringLiteral(" 搜索"));
     buildUi();
     loadUsage();
     m_apps = AppScanner::loadIndex();
@@ -367,6 +432,20 @@ void SearchWindow::buildUi()
     auto* inputLay = new QHBoxLayout(inputRow);
     inputLay->setContentsMargins(0, 0, 0, 0);
     inputLay->setSpacing(2);
+    m_clipHistoryBack = new QToolButton(inputRow);
+    m_clipHistoryBack->setObjectName(QStringLiteral("clipHistoryBack"));
+    m_clipHistoryBack->setText(QStringLiteral("‹ 返回"));
+    m_clipHistoryBack->setAccessibleName(QStringLiteral("返回剪贴板预览"));
+    m_clipHistoryBack->setToolTip(QStringLiteral("返回剪贴板预览（Esc）"));
+    m_clipHistoryBack->setFocusPolicy(Qt::StrongFocus);
+    m_clipHistoryBack->setCursor(Qt::PointingHandCursor);
+    Theme::bindLauncher(m_clipHistoryBack,
+        "QToolButton{background:@card;border:1px solid transparent;border-radius:8px;"
+        "color:@editText;padding:5px 10px;}"
+        "QToolButton:hover{background:@rowSel;}QToolButton:focus{border-color:@accent;}");
+    inputLay->addWidget(m_clipHistoryBack);
+    m_clipHistoryBack->hide();
+    connect(m_clipHistoryBack, &QToolButton::clicked, this, &SearchWindow::leaveClipboardHistory);
     inputLay->addWidget(m_input, 1);
     m_list = new QListWidget(this);
     m_list->setObjectName(QStringLiteral("list"));
@@ -448,9 +527,37 @@ void SearchWindow::buildUi()
     m_debounce->setInterval(120);
     connect(m_debounce, &QTimer::timeout, this, &SearchWindow::runSearch);
     connect(m_input, &QLineEdit::textChanged, this, [this](const QString&) {
+        if (!m_clipHistoryAlias.isEmpty()) m_clipHistoryLimit = 30;
         scheduleSearch();
     });
     connect(m_settingsBtn, &QToolButton::clicked, this, &SearchWindow::openSettings);
+    HotaruNativeHost::subscribeChanged(this, [this,
+        files = HotaruNativeHost::enabled(QLatin1String(kHotaruLanFilesId)),
+        alias = HotaruNativeHost::clipboardSearchAlias(), filePeers = QStringList{}, clipOnline = false]() mutable {
+        const auto newFiles = HotaruNativeHost::enabled(QLatin1String(kHotaruLanFilesId));
+        const auto newAlias = HotaruNativeHost::clipboardSearchAlias();
+        const bool newClipOnline = !newAlias.isEmpty() && !HotaruNativeHost::peers(kHotaruFeatureClipboard).isEmpty();
+        const auto query = halfWidth(m_input->text()).trimmed().toLower();
+        QStringList peers;
+        if (newFiles)
+            for (const auto& item : HotaruNativeHost::peers(kHotaruFeatureFiles))
+                peers << QString::fromLatin1(item.id.toHex()) << item.name << item.address;
+        const bool refresh = (query.startsWith(QLatin1Char('@')) && (files != newFiles || peers != filePeers)) ||
+            ((!m_clipHistoryAlias.isEmpty() || (!query.isEmpty() && (query == alias || query == newAlias))) && (alias != newAlias || clipOnline != newClipOnline));
+        files = newFiles;
+        alias = newAlias;
+        clipOnline = newClipOnline;
+        filePeers = std::move(peers);
+        if (refresh && isVisible())
+            runSearch();
+    });
+    connect(&ClipboardStore::instance(), &ClipboardStore::changed, this, [this] {
+        const auto alias = HotaruNativeHost::clipboardSearchAlias();
+        if (isVisible() && !alias.isEmpty() &&
+            (!m_clipHistoryAlias.isEmpty() || halfWidth(m_input->text()).trimmed().compare(alias, Qt::CaseInsensitive) == 0))
+            runSearch();
+    });
+    PluginHost::subscribeShortcutsChanged(this, [this] { if (isVisible()) runSearch(); });
     qApp->installEventFilter(this);
 
     // 装了新软件搜不到：应用索引以前只在启动时扫一次，配置里那个"扫描间隔"也没人读。
@@ -491,7 +598,6 @@ void SearchWindow::buildUi()
         });
         m_periodicScan->start();
     }
-    watchAppDirs();
 }
 
 // 监视快捷方式所在的目录（含子目录，深度与 AppScanner::scan 一致）。
@@ -569,7 +675,7 @@ void SearchWindow::openSettings()
         connect(dlg,&SettingsDialog::rescanRequested,this,&SearchWindow::rescan);
         connect(dlg,&SettingsDialog::hotkeyChanged,this,&SearchWindow::hotkeyChanged);
         connect(dlg,&SettingsDialog::hotkeyCaptureActive,this,&SearchWindow::hotkeyCaptureActive);
-        connect(dlg,&QObject::destroyed,this,[this] {m_settingsOpen=false;refreshLauncher();});
+        connect(dlg,&QObject::destroyed,this,[this] {m_settingsOpen=false;if (!m_quitting) refreshLauncher();});
         dlg->openAt(2,1);
         Utils::log(QStringLiteral("settings: 已创建并加载配置页"));
     }
@@ -621,11 +727,76 @@ void SearchWindow::openSettings()
     });
 }
 
+void SearchWindow::requestQuit()
+{
+    if (m_quitting)
+        return;
+    const auto focusWindow = [](QWidget* widget) {
+        if (widget->isMinimized()) widget->showNormal();
+        widget->raise();
+        widget->activateWindow();
+    };
+    if (m_quitPrompt) {
+        focusWindow(m_quitPrompt);
+        return;
+    }
+    if (m_settingsDlg) {
+        if (auto* modal = QApplication::activeModalWidget()) {
+            focusWindow(modal);
+            if (!m_quitPending) {
+                m_quitPending = true;
+                auto* retry = new QTimer(this);
+                retry->setInterval(100);
+                connect(retry, &QTimer::timeout, this, [this, retry] {
+                    if (QApplication::activeModalWidget()) return;
+                    retry->stop();
+                    retry->deleteLater();
+                    m_quitPending = false;
+                    requestQuit();
+                });
+                retry->start();
+            }
+            return;
+        }
+        focusWindow(m_settingsDlg);
+        auto* prompt = new QMessageBox(QMessageBox::Question, QStringLiteral("退出 Hotaru"),
+            QStringLiteral("是否退出 Hotaru？"),
+            QMessageBox::NoButton, m_settingsDlg);
+        m_quitPrompt = prompt;
+        prompt->setAttribute(Qt::WA_DeleteOnClose);
+        auto* quit = prompt->addButton(QStringLiteral("确认"), QMessageBox::AcceptRole);
+        auto* cancel = prompt->addButton(QStringLiteral("取消"), QMessageBox::RejectRole);
+        prompt->setDefaultButton(cancel);
+        prompt->setEscapeButton(cancel);
+        connect(prompt, &QMessageBox::finished, this, [this, prompt, quit] {
+            m_quitPrompt.clear();
+            if (prompt->clickedButton() != quit)
+                return;
+            m_quitting = true;
+            QTimer::singleShot(0, this, [this] {
+                delete m_settingsDlg.data();
+                QCoreApplication::quit();
+            });
+        });
+        prompt->open();
+        return;
+    }
+    m_quitting = true;
+    QCoreApplication::quit();
+}
+
 void SearchWindow::openSettingsPage(int menuRow)
 {
     openSettings();
     if (auto* dlg = qobject_cast<SettingsDialog*>(m_settingsDlg.data()))
         dlg->openAt(menuRow);
+}
+
+void SearchWindow::openNativePlugin(const QString& id, const QByteArray& target)
+{
+    openSettings();
+    if (auto* dialog = qobject_cast<SettingsDialog*>(m_settingsDlg.data()))
+        dialog->openNativePlugin(id, target);
 }
 
 void SearchWindow::openTool(const QString& id, const QString& text)
@@ -652,8 +823,12 @@ void SearchWindow::showLauncher(const char* why)
         s = QGuiApplication::primaryScreen();
     const QRect g = s->availableGeometry();
     move(g.center().x() - width() / 2, g.top() + int(g.height() * 0.20));
+    m_clipHistoryAlias.clear();
+    m_input->setPlaceholderText(QStringLiteral("搜索固定软件、应用、文件或网址"));
     m_input->clear(); // 再次呼出不保留上一次的搜索
     runSearch();
+    if (FileIndexer::instance().count() == 0 && FileIndexer::instance().deepCount() == 0)
+        setStatus(QStringLiteral("正在准备文件索引，应用和快捷搜索可以使用"));
     const auto pageConfig=PinnedApps::config();
     m_grid->setPage(pageConfig.rememberPage?pageConfig.lastPage:0);
     const qint64 msLayout = lap.elapsed();
@@ -696,32 +871,7 @@ void SearchWindow::showLauncher(const char* why)
 
 void SearchWindow::warmUp()
 {
-    if (m_warmed || isVisible())
-        return;
-    m_warmed = true;
-    // 第一次 show() 要付 Qt 建原生窗口 + DWM 首帧 + 字体/委托首次绘制的钱（实测约 300ms），
-    // 那笔钱本来全落在用户第一次按热键上。挪到所有显示器之外映射一遍再收起，界面看不到。
-    const QPoint saved = pos();
-    // 两道保险：位置挪到显示器之外（Qt 有时会把它夹回屏幕内），同时整窗透明度压到 0
-    setWindowOpacity(0.0);
-    move(-32000, -32000);
-    show();
-    repaint();
-    QCoreApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
-    // 这一行量的必须是**停在预热位置那一刻**的矩形。以前它排在 `move(saved)` 之后才读 x()/y()，
-    // 读到的是恢复完的落点（本机日志一直打 (0,0 660x100) 就是这个），
-    // 而"有没有被 Qt 夹回屏幕里"这件事当场就测不到 —— 被夹回来的话，那一下就是"搜索框自己闪出来"。
-    const QRect parked = geometry();
-    bool onScreen = false;
-    for (QScreen* sc : QGuiApplication::screens())
-        if (sc->geometry().intersects(parked)) { onScreen = true; break; }
-    hide();
-    setWindowOpacity(1.0);
-    move(saved);
-    Utils::log(QStringLiteral("warmup: 预热时窗口矩形=(%1,%2 %3x%4) · %5")
-                   .arg(parked.x()).arg(parked.y()).arg(parked.width()).arg(parked.height())
-                   .arg(onScreen ? QStringLiteral("还压在某个显示器里（只靠透明度 0 遮着）")
-                                 : QStringLiteral("在所有显示器之外")));
+    ensurePolished();
 }
 
 void SearchWindow::toggleVisible()
@@ -1399,6 +1549,14 @@ bool SearchWindow::eventFilter(QObject* obj, QEvent* e)
         hide();
         return true;
     }
+    if (!m_clipHistoryAlias.isEmpty() && e->type() == QEvent::KeyPress &&
+        static_cast<QKeyEvent*>(e)->key() == Qt::Key_Escape &&
+        (obj == m_input || obj == m_clipHistoryBack || obj == m_list || obj == m_list->viewport() || obj == this) &&
+        !QApplication::activePopupWidget() && !QApplication::activeModalWidget()) {
+        if (!static_cast<QKeyEvent*>(e)->isAutoRepeat())
+            leaveClipboardHistory();
+        return true;
+    }
     if (obj == m_input && e->type() == QEvent::KeyPress) {
         auto* ke = static_cast<QKeyEvent*>(e);
         if (m_homeScroll->isVisible() && (ke->key()==Qt::Key_PageUp || ke->key()==Qt::Key_PageDown)) {
@@ -1420,7 +1578,8 @@ bool SearchWindow::eventFilter(QObject* obj, QEvent* e)
         }
         switch (ke->key()) {
         case Qt::Key_Escape:
-            hide();
+            if (!ke->isAutoRepeat())
+                hide();
             return true;
         case Qt::Key_Up:
             moveCurrent(-1);
@@ -1536,19 +1695,32 @@ void SearchWindow::rebuildList()
     }
     // 空查询又没有列表（配置里关掉了"呼出时显示常用列表"）：连控件一起藏掉，
     // 不然它自己的最小高度会把窗口撑住，缩不成"只有一个搜索框"
-    m_list->setVisible(!(m_list->count() == 0 && m_input->text().trimmed().isEmpty()));
+    m_list->setVisible(m_list->count() > 0 || !m_input->text().trimmed().isEmpty());
     updateHeight();
 }
 
 void SearchWindow::runSearch()
 {
+    m_debounce->stop();
     ++m_searchSeq;
     m_results.clear();
-    m_regIssues.clear();
 
     const QString q = halfWidth(m_input->text()).trimmed();
     const QString low = q.toLower();
 
+    const auto clipAlias = HotaruNativeHost::clipboardSearchAlias();
+    if (!m_clipHistoryAlias.isEmpty() && m_clipHistoryAlias != clipAlias) {
+        m_clipHistoryAlias.clear();
+        m_input->setPlaceholderText(QStringLiteral("搜索固定软件、应用、文件或网址"));
+    }
+    m_clipHistoryBack->setVisible(!m_clipHistoryAlias.isEmpty());
+    if (!clipAlias.isEmpty() && (low == clipAlias || !m_clipHistoryAlias.isEmpty())) {
+        m_homeScroll->hide();
+        m_pageBar->hide();
+        showClipboardResults();
+        rebuildList();
+        return;
+    }
     const auto launcher = PinnedApps::config();
     if (q.isEmpty()) {
         // 每次刷新读取设置，避免呼出、清空搜索或关闭设置后又强制显示网格。
@@ -1566,6 +1738,35 @@ void SearchWindow::runSearch()
         m_homeScroll->setVisible(false);
 
     m_pageBar->setVisible(false);
+    // @ 只列出已认证且启用文件分享的设备；此分支不启动文件索引，避免异步结果覆盖设备选择。
+    if (low.startsWith(QLatin1Char('@')) && HotaruNativeHost::enabled(QStringLiteral("lan-files"))) {
+        const QString prefix = q.mid(1).trimmed();
+        addSection(QStringLiteral("── 局域网文件发送 ──"));
+        const auto devices = HotaruNativeHost::peers(kHotaruFeatureFiles);
+        int added = 0;
+        for (const HotaruNativePeer& peer : devices) {
+            if (!prefix.isEmpty() && !peer.name.startsWith(prefix, Qt::CaseInsensitive))
+                continue;
+            SearchResult item;
+            item.kind = SearchResult::NativePeer;
+            item.title = peer.name.isEmpty() ? QStringLiteral("未命名设备") : peer.name;
+            item.subtitle = QStringLiteral("%1 · 已配对 · 选择文件或文件夹发送").arg(peer.address);
+            item.target = QString::fromLatin1(peer.id.toBase64());
+            item.icon = letterIcon(QStringLiteral("发"), QColor(46, 160, 120));
+            addItem(item);
+            ++added;
+        }
+        if (!added) {
+            SearchResult empty;
+            empty.kind = SearchResult::Info;
+            empty.actionable = false;
+            empty.title = QStringLiteral("没有可发送的已配对设备");
+            empty.subtitle = QStringLiteral("请确认设备已配对、在线，并启用了文件分享。");
+            addItem(empty);
+        }
+        rebuildList();
+        return;
+    }
     // 搜索到的工具继续使用现有 DLL 插件入口。
     // 索引指的是 PluginHost::scan() 里那一条 —— 九个自带工具现在也是插件，这里没有特判。
     const auto addToolRow = [this](int i) {
@@ -1573,7 +1774,7 @@ void SearchWindow::runSearch()
         SearchResult r;
         r.kind = SearchResult::Command;
         r.title = QStringLiteral("打开 %1").arg(td.name);
-        r.subtitle = QStringLiteral("%1 · DLL 工具（点开才加载）").arg(td.desc);
+        r.subtitle = td.desc;
         r.target = QStringLiteral("tool:%1").arg(td.id);
         r.icon = letterIcon(td.name, td.color);
         addItem(r);
@@ -1584,30 +1785,16 @@ void SearchWindow::runSearch()
     QVector<int> toolIndices;
     {
         const auto& metas = PluginHost::scan();
-        for (int i = 0; i < metas.size(); ++i)
-            if (metas[i].ok() && !PluginHost::isDisabled(metas[i].id))
+        for (int i = 0; i < metas.size(); ++i) {
+            const auto& meta = metas[i];
+            const auto& known = PluginHost::shortcuts();
+            const bool managed = std::any_of(known.cbegin(), known.cend(), [&](const auto& item) { return item.id == meta.id; });
+            if (meta.ok() && !PluginHost::isDisabled(meta.id) && (!managed || PluginHost::shortcutAvailable(meta.id)))
                 toolIndices << i;
+        }
     }
 
-    // 命令区域：init / path / reg / rescan
-    const QString tok0 = q.section(' ', 0, 0).toLower();
-    const QString rest = q.mid(tok0.size()).trimmed();
-
-    if (tok0 == "init") {
-        handleInit(rest);
-        rebuildList();
-        return;
-    }
-    if (tok0 == "path") {
-        handlePath(rest);
-        rebuildList();
-        return;
-    }
-    if (tok0 == "reg") {
-        handleReg(rest);
-        rebuildList();
-        return;
-    }
+    const QString tok0 = low.section(QLatin1Char(' '), 0, 0);
 
     // rescan 命令行
     if (tok0 == "rescan") {
@@ -1622,81 +1809,20 @@ void SearchWindow::runSearch()
         return;
     }
 
-    // json 命令行（带内容）：直接把那串递给 JSON 工具那张页解析
-    if (tok0 == "json" && !q.mid(tok0.size()).trimmed().isEmpty() && !PluginHost::isDisabled(QStringLiteral("json"))) {
-        SearchResult r;
-        r.kind = SearchResult::Command;
-        r.title = "json — 把后面这串丢进 JSON 格式化";
-        const QString payload = q.mid(tok0.size()).trimmed();
-        r.subtitle = QStringLiteral("按 Enter 打开工具页并解析 %1 个字符").arg(payload.size());
-        r.target = "tool:json";
-        r.extra = payload;
-        r.icon = letterIcon("{}", QColor(90, 140, 220));
-        addItem(r);
-        rebuildList();
-        return;
-    }
-
-    // base64 命令行（带内容）：直接把那串递给编解码那张页
-    if ((tok0 == "b64" || tok0 == "base64") && !q.mid(tok0.size()).trimmed().isEmpty() && !PluginHost::isDisabled(QStringLiteral("base64"))) {
-        SearchResult r;
-        r.kind = SearchResult::Command;
-        r.title = "b64 — 把后面这串拿去解码";
-        const QString payload = q.mid(tok0.size()).trimmed();
-        r.subtitle = QStringLiteral("按 Enter 打开工具页并解码 %1 个字符").arg(payload.size());
-        r.target = "tool:base64";
-        r.extra = payload;
-        r.icon = letterIcon("=", QColor(190, 130, 60));
-        addItem(r);
-        rebuildList();
-        return;
-    }
-
-    // 剪贴板历史：clip 列出最近的条目，Enter 放回剪贴板，Ctrl+Enter 顺手粘出去
-    if (tok0 == "clip" || low.contains(QStringLiteral("剪贴板"))) {
-        auto& cs = ClipboardStore::instance();
-        addSection(QStringLiteral("剪贴板历史"));
-        if (!cs.enabled()) {
-            SearchResult r;
-            r.kind = SearchResult::Command;
-            r.title = QStringLiteral("开启剪贴板记录");
-            r.subtitle = QStringLiteral("现在没在记录（设置 → 配置 → 剪贴板 里也能关）。开启后复制过的文本和图片会被收进本地历史。");
-            r.target = "clip:on";
-            r.icon = letterIcon(QStringLiteral("刷"), QColor(190, 130, 60));
-            addItem(r);
-        } else if (cs.items().isEmpty()) {
-            SearchResult r;
-            r.kind = SearchResult::Command;
-            r.title = QStringLiteral("还没有记录：复制点东西再回来");
-            r.subtitle = QStringLiteral("上限 200 条；超过 256 KB 的文本不收");
-            r.target = "clip:none";
-            r.actionable = false;
-            addItem(r);
-        }
-        int n = 0;
-        for (const ClipboardStore::Item& it : cs.items()) {
-            if (n >= 15)
-                break;
-            SearchResult r;
-            r.kind = SearchResult::Command;
-            r.title = ClipboardStore::summary(it);
-            r.subtitle = QStringLiteral("%1 · Enter 放回剪贴板，Ctrl+Enter 直接粘贴")
-                             .arg(it.when.toString("MM-dd hh:mm"));
-            r.target = QStringLiteral("clip:%1").arg(n);
-            QIcon ic = cs.iconFor(it);
-            r.icon = ic.isNull() ? letterIcon(QStringLiteral("剪"), QColor(150, 110, 220)) : ic;
-            addItem(r);
-            ++n;
-        }
-        if (cs.enabled() && !cs.items().isEmpty()) {
-            SearchResult r;
-            r.kind = SearchResult::Command;
-            r.title = QStringLiteral("清空剪贴板历史");
-            r.subtitle = QStringLiteral("删除 %1 条记录（含图片文件）").arg(cs.items().size());
-            r.target = "clip:clear";
-            r.icon = letterIcon(QStringLiteral("×"), QColor(214, 69, 69));
-            addItem(r);
-        }
+    // 专用带参结果只使用启动时已验证的兼容插件。
+    for (const auto& shortcut : PluginHost::shortcuts()) {
+        const auto payload = q.mid(tok0.size()).trimmed();
+        if (!shortcut.acceptsText || payload.isEmpty() || !shortcut.words.contains(tok0) ||
+            !PluginHost::shortcutAvailable(shortcut.id))
+            continue;
+        SearchResult row;
+        row.kind = SearchResult::Command;
+        row.target = QStringLiteral("tool:") + shortcut.id;
+        row.title = QStringLiteral("打开 %1").arg(shortcut.label);
+        row.subtitle = QStringLiteral("按 Enter 将 %1 个字符交给插件").arg(payload.size());
+        row.extra = payload;
+        row.icon = letterIcon(shortcut.label, QColor(90, 140, 220));
+        addItem(row);
         rebuildList();
         return;
     }
@@ -1723,47 +1849,6 @@ void SearchWindow::runSearch()
         if (w.keys.contains(webTok) || w.name.compare(webTok, Qt::CaseInsensitive) == 0)
             webKeywordWins = true;
 
-    // 电源那两件事（2026-10-19 他点名要的：输 sleep/休眠 就休眠，输 shutdown/关机 就关机）。
-    // 中文词只认**整条相等** —— "关机后怎么恢复文件"是一句查询，前缀匹配会把它当成要点电源。
-    // 英文词按"命令行形状"认：`shutdown`、`shutdown.exe`、`shutdown /s` 都是要动手，
-    // `shutdown 怎么用` 是在查资料（尾巴是普通词，不是开关），不算。
-    // `shut` 是同一动作的口头缩写（他 2026-10-19 点名要），走同一条尾巴规矩 ——
-    // 所以 `shutter`、`shut down the pc` 这类尾巴是普通词的仍然只当查询。
-    // 也不清场：应用/文件/网站那几节照常在下面列出来（直达那条 2026-10-16 吃过亏的规矩）。
-    const auto powerWord = [&low](const char* word) {
-        const QString w = QLatin1String(word);
-        if (!low.startsWith(w))
-            return false;
-        const QString tail = low.mid(w.size());
-        if (tail.isEmpty() || tail == QLatin1String(".exe"))
-            return true;
-        return tail.size() >= 2 && tail.startsWith(QLatin1Char(' '))
-            && (tail.at(1) == QLatin1Char('/') || tail.at(1) == QLatin1Char('-'));
-    };
-    const bool wantHiber = low == QStringLiteral("休眠") || powerWord("sleep") || powerWord("hibernate");
-    const bool wantOff = low == QStringLiteral("关机") || powerWord("shutdown") || powerWord("shut");
-    if (wantHiber) {
-        addSection(QStringLiteral("系统动作"));
-        SearchResult r;
-        r.kind = SearchResult::Command;
-        r.title = QStringLiteral("休眠（Hibernate）");
-        r.subtitle = SysTools::hibernationEnabled()
-            ? QStringLiteral("按 Enter 立刻休眠这台电脑（回到桌面时东西都还在）")
-            : QStringLiteral("这台机器现在没开休眠，按 Enter 会失败 —— 管理员命令行跑一次 powercfg /h on");
-        r.target = QStringLiteral("power:hibernate");
-        r.icon = letterIcon(QStringLiteral("眠"), QColor(120, 90, 200));
-        addItem(r);
-    } else if (wantOff) {
-        addSection(QStringLiteral("系统动作"));
-        SearchResult r;
-        r.kind = SearchResult::Command;
-        r.title = QStringLiteral("关机");
-        r.subtitle = QStringLiteral("按 Enter 立刻关闭这台电脑 —— 这条路不问第二遍（点名要的快路径）");
-        r.target = QStringLiteral("power:shutdown");
-        r.icon = letterIcon(QStringLiteral("关"), QColor(214, 69, 69));
-        addItem(r);
-    }
-
     QVector<int> toolLoose;
     QVector<int> toolExact;   // 工具直达命中的那几条。**只算不发** —— 谁排第一由下面那段决定
     {
@@ -1781,6 +1866,12 @@ void SearchWindow::runSearch()
             const QString name = td.name.toLower();
             bool hitExact = (low == name);
             bool hitLoose = low.contains(name);
+            for (const auto& shortcut : PluginHost::shortcuts())
+                if (shortcut.id == td.id && shortcut.words.contains(low))
+                    hitExact = true;
+            // reg 的带参旧命令已退役；注册表操作只在插件详情页执行。
+            if (td.id == QLatin1String("registry") && tok0 == QLatin1String("reg") && low != tok0)
+                continue;
             for (const QString& kw : td.keywords) {
                 const QString k = kw.toLower();
                 if (k.isEmpty())
@@ -1818,6 +1909,10 @@ void SearchWindow::runSearch()
             ms.append({s, i});
     }
     std::sort(ms.begin(), ms.end(), [this](const Match& a, const Match& b) {
+        const bool sa = m_apps[a.idx].category == QLatin1String("system");
+        const bool sb = m_apps[b.idx].category == QLatin1String("system");
+        if (sa != sb)
+            return sa;
         if (a.score != b.score)
             return a.score < b.score;
         const int ua = m_usage.value(usageKey(m_apps[a.idx].lnkPath, m_apps[a.idx].target), 0);
@@ -1829,12 +1924,31 @@ void SearchWindow::runSearch()
 
     // 节的先后（他 2026-10-21 拍的）：**没命中直达时应用第一、网站第二**；
     // 命中工具直达时直达仍占第一行、回车还是它（10-19 定的一条，他这次选的是"别让位"）。
-    // 电源那两条（休眠/关机）也是直达，在上面就先发 —— 那支要是让位，输 `shutdown`
-    // 回车可能变成启动一个名字像 shutdown 的应用。
-    // 直达**不再清场**。以前这里 `return`，后面「网站 / 网址直开 / 应用 / 文件 / 系统 /
-    // 剪贴板历史」五节整个没跑到 —— 那是一条有特权的路，拿真实的 apps.json 复算过：
-    // 这台机器上 51 个查询串会命中它、连带 44 个应用永远搜不出来（最刺眼的是 `windows`：
-    // 「Windows 用户名」那把工具的名字本身就是 windows 开头，于是所有 Windows* 应用没了）。
+    // 快捷搜索只取第一个完整词，后续内容不会拼接到目标地址或命令参数。
+    // 兜底那条以前单独甩在整个列表最末尾，等于"网站"这一类排到了最后 —— 现在三条挨着放。
+    // webs / webTok 在工具那一节之前就算好了。
+    // 这一组**以前没有表头**：那几行直接跟在上一节的表头（搜 `b64` 时就是"工具"）底下，
+    // 看着像工具的结果。补一个快捷搜索分组表头。
+    for (const WebEntry& w : webs) {
+        if (!w.keys.contains(webTok) && w.name.compare(webTok, Qt::CaseInsensitive) != 0)
+            continue;
+        addSection(QStringLiteral("── 快捷搜索 ──"));
+        SearchResult r;
+        r.kind = SearchResult::QuickSearch;
+        r.title = w.name;
+        const QString target = w.target.isEmpty() ? w.url : w.target;
+        const QString typeLabel = w.targetType == QLatin1String("folder") ? QStringLiteral("磁盘文件夹")
+            : w.targetType == QLatin1String("app") ? QStringLiteral("应用或脚本") : QStringLiteral("网页");
+        r.subtitle = QStringLiteral("快捷搜索 · %1 · %2").arg(typeLabel, target);
+        r.target = target;
+        r.extra = w.targetType;
+        r.icon = w.targetType == QLatin1String("folder") ? QApplication::style()->standardIcon(QStyle::SP_DirIcon)
+            : w.targetType == QLatin1String("app") ? Utils::cachedFileIcon(target) : letterIcon(w.name, colorForKind(target));
+        if (r.icon.isNull()) r.icon = letterIcon(w.name, colorForKind(target));
+        addItem(r);
+        break;
+    }
+
     const bool toolFirst = !toolExact.isEmpty() && !webKeywordWins;
     if (toolFirst) {
         addSection(QStringLiteral("工具"));
@@ -1914,9 +2028,19 @@ void SearchWindow::runSearch()
 
     if (!ms.isEmpty())
         addSection("── 应用 ──");
-    const int appLimit = qMin(8, ms.size());
-    for (int k = 0; k < appLimit; ++k) {
+    QStringList systemTargets;
+    int shownApps = 0;
+    for (int k = 0; k < ms.size() && shownApps < 8; ++k) {
         const AppEntry& a = m_apps[ms[k].idx];
+        if (!a.target.isEmpty()) {
+            const QString key = QDir::cleanPath(QDir::fromNativeSeparators(a.target)).toCaseFolded()
+                                + QLatin1Char('\n') + a.args.trimmed();
+            if (systemTargets.contains(key))
+                continue;
+            if (a.category == QLatin1String("system"))
+                systemTargets.append(key);
+        }
+        ++shownApps;
         SearchResult r;
         r.kind = SearchResult::App;
         r.title = a.name;
@@ -1931,30 +2055,6 @@ void SearchWindow::runSearch()
         addItem(r);
     }
 
-    // 快捷搜索只取第一个完整词，后续内容不会拼接到目标地址或命令参数。
-    // 兜底那条以前单独甩在整个列表最末尾，等于"网站"这一类排到了最后 —— 现在三条挨着放。
-    // webs / webTok 在工具那一节之前就算好了。
-    // 这一组**以前没有表头**：那几行直接跟在上一节的表头（搜 `b64` 时就是"工具"）底下，
-    // 看着像工具的结果。补一个快捷搜索分组表头。
-    const int webMark = m_results.size();
-    for (const WebEntry& w : webs) {
-        if (!w.keys.contains(webTok) && w.name.compare(webTok, Qt::CaseInsensitive) != 0)
-            continue;
-        SearchResult r;
-        r.kind = SearchResult::QuickSearch;
-        r.title = w.name;
-        const QString target = w.target.isEmpty() ? w.url : w.target;
-        const QString typeLabel = w.targetType == QLatin1String("folder") ? QStringLiteral("磁盘文件夹")
-            : w.targetType == QLatin1String("app") ? QStringLiteral("应用或脚本") : QStringLiteral("网页");
-        r.subtitle = QStringLiteral("快捷搜索 · %1 · %2").arg(typeLabel, target);
-        r.target = target;
-        r.extra = w.targetType;
-        r.icon = w.targetType == QLatin1String("folder") ? QApplication::style()->standardIcon(QStyle::SP_DirIcon)
-            : w.targetType == QLatin1String("app") ? Utils::cachedFileIcon(target) : letterIcon(w.name, colorForKind(target));
-        if (r.icon.isNull()) r.icon = letterIcon(w.name, colorForKind(target));
-        addItem(r);
-        break;
-    }
     if (WebShortcuts::looksLikeUrl(q)) {
         SearchResult r;
         r.kind = SearchResult::Web;
@@ -1964,29 +2064,22 @@ void SearchWindow::runSearch()
         r.icon = letterIcon("网", QColor(31, 141, 160));
         addItem(r);
     }
+    if (!toolLoose.isEmpty()) {
+        addSection(QStringLiteral("工具"));
+        for (const int i : std::as_const(toolLoose))
+            addToolRow(i);
+    }
+
     // 网络搜索兜底（始终提供）
     if (low.size() >= 2) {
         SearchResult r;
         r.kind = SearchResult::Web;
+        r.extra = QStringLiteral("search-engine");
         r.title = QString("用搜索引擎搜索 “%1”").arg(q);
         r.subtitle = WebShortcuts::engineSearchUrl(q);
         r.target = WebShortcuts::engineSearchUrl(q);
         r.icon = letterIcon("搜", QColor(136, 87, 229));
         addItem(r);
-    }
-    if (m_results.size() > webMark) {
-        SearchResult h;
-        h.kind = SearchResult::Info;
-        h.actionable = false;
-        h.isSection = true;
-        h.title = QStringLiteral("── 快捷搜索 ──");
-        m_results.insert(webMark, h);   // 表头补在这一组最前面（列表是 rebuildList() 时按 m_results 铺的）
-    }
-
-    if (!toolLoose.isEmpty()) {
-        addSection(QStringLiteral("工具"));
-        for (const int i : std::as_const(toolLoose))
-            addToolRow(i);
     }
 
     // 文件搜索（≥2 个字符才搜，避免太泛）：丢到线程池，结果稍后插回列表
@@ -2008,7 +2101,8 @@ void SearchWindow::runSearch()
 void SearchWindow::startFileSearch(const QString& q)
 {
     if (m_fileSearchBusy) {
-        m_fileSearchRerun = true;
+        m_pendingFileQuery = q;
+        m_pendingFileSeq = m_searchSeq;
         return;
     }
     m_fileSearchBusy = true;
@@ -2020,16 +2114,19 @@ void SearchWindow::startFileSearch(const QString& q)
                 const auto files = watcher->result();
                 watcher->deleteLater();
                 m_fileSearchBusy = false;
-                if (m_fileSearchRerun) {
-                    m_fileSearchRerun = false;
-                    runSearch();
-                    return;
+                const QString current = halfWidth(m_input->text()).trimmed();
+                if (!m_pendingFileQuery.isEmpty()) {
+                    const auto pending = std::exchange(m_pendingFileQuery, QString());
+                    if (m_pendingFileSeq == m_searchSeq && current == pending)
+                        startFileSearch(pending);
                 }
-                if (seq != m_searchSeq || halfWidth(m_input->text()).trimmed() != q)
+                if (seq != m_searchSeq || current != q)
                     return;   // 查询已变，结果作废
                 if (files.isEmpty())
                     return;
 
+                const int oldRow = m_list->currentRow();
+                const SearchResult selected = m_results.value(oldRow);
                 for (int i = m_results.size() - 1; i >= 0; --i)
                     if (m_results[i].kind == SearchResult::Info
                         && m_results[i].title == QStringLiteral("无匹配结果"))
@@ -2037,10 +2134,9 @@ void SearchWindow::startFileSearch(const QString& q)
                 int pos = m_results.size();
                 // 插在"用搜索引擎搜索…"那条兜底行之前 = 应用/网站/工具之后。
                 // 以前是找第一条 Web 行，于是命中网站快捷方式时文件会被顶到最上面。
-                const QString fallbackUrl = WebShortcuts::engineSearchUrl(q);
                 for (int i = 0; i < m_results.size(); ++i) {
                     if (m_results[i].kind == SearchResult::Web
-                        && m_results[i].target == fallbackUrl) {
+                        && m_results[i].extra == QLatin1String("search-engine")) {
                         pos = i;
                         break;
                     }
@@ -2057,13 +2153,29 @@ void SearchWindow::startFileSearch(const QString& q)
                     r.title = fe.name;
                     r.subtitle = fe.path;
                     r.target = fe.path;
-                    r.icon = Utils::cachedFileIcon(fe.path);
+                    r.icon = fe.isDir ? style()->standardIcon(QStyle::SP_DirIcon)
+                                      : Utils::cachedFileIcon(fe.path);
                     m_results.insert(pos++, r);
                 }
                 rebuildList();
+                // 如果用户已经选了某项，后台插入文件结果时保留原来的选择。
+                // 默认选中的兜底网页可以让位给新到的首条实际结果。
+                const int first = firstActionableRow();
+                if (oldRow >= 0 && selected.actionable && !selected.isSection
+                    && selected.extra != QLatin1String("search-engine")) {
+                    for (int i = 0; i < m_results.size(); ++i) {
+                        const auto& result = m_results[i];
+                        if (result.kind == selected.kind && result.title == selected.title
+                            && result.target == selected.target && result.extra == selected.extra) {
+                            if (i != first)
+                                m_list->setCurrentRow(i);
+                            break;
+                        }
+                    }
+                }
             });
     watcher->setFuture(QtConcurrent::run(
-        [q]() { return FileIndexer::instance().search(q, 8); }));
+        [q]() { return FileIndexer::instance().search(q, 8, 2); }));
 }
 
 // ---------- 激活 ----------
@@ -2107,6 +2219,119 @@ void SearchWindow::activateCurrent()
     activateRow(row);
 }
 
+void SearchWindow::leaveClipboardHistory()
+{
+    if (m_clipHistoryAlias.isEmpty())
+        return;
+    const auto alias = std::exchange(m_clipHistoryAlias, QString{});
+    m_input->setPlaceholderText(QStringLiteral("搜索固定软件、应用、文件或网址"));
+    m_input->setText(alias);
+    m_input->setFocus();
+    runSearch();
+}
+
+void SearchWindow::showClipboardResults()
+{
+    auto& store = ClipboardStore::instance();
+    const bool history = !m_clipHistoryAlias.isEmpty();
+    QSet<QString> shown;
+    QString filter = history ? m_input->text().trimmed() : QString{};
+    std::optional<bool> fromLan;
+    for (const auto& label : {QStringLiteral("本机"), QStringLiteral("局域网")}) {
+        if (filter == label || filter.startsWith(label + QLatin1Char(' '))) {
+            fromLan = label == QStringLiteral("局域网");
+            filter = filter.mid(label.size()).trimmed();
+            break;
+        }
+    }
+    auto info = [this](const QString& title, const QString& subtitle = {}) {
+        SearchResult row;
+        row.title = title;
+        row.subtitle = subtitle;
+        row.actionable = false;
+        addItem(row);
+    };
+    auto itemRow = [this, &store](const ClipboardStore::Item& item, const QString& target, const QImage& thumbnail = {}, const QString& source = {}) {
+        SearchResult row;
+        row.kind = SearchResult::Command;
+        row.target = target;
+        row.title = item.isImage
+            ? (item.bytes > 0 ? ClipboardStore::summary(item) : QStringLiteral("图片 %1×%2").arg(item.w).arg(item.h))
+            : item.text.left(320);
+        row.subtitle = (source.isEmpty() ? (item.fromLan ? QStringLiteral("局域网") : QStringLiteral("本机")) : source) +
+            (item.when.isValid() ? QStringLiteral(" · ") + item.when.toString(QStringLiteral("MM-dd HH:mm")) : QString{});
+        row.icon = thumbnail.isNull() ? store.iconFor(item) : QIcon(QPixmap::fromImage(thumbnail));
+        if (row.icon.isNull())
+            row.icon = letterIcon(QStringLiteral("剪"), QColor(150, 110, 220));
+        addItem(row);
+    };
+    if (!history) {
+        const bool online = !HotaruNativeHost::peers(kHotaruFeatureClipboard).isEmpty();
+        addSection(online ? QStringLiteral("当前剪贴板 · 局域网已连接") : QStringLiteral("当前剪贴板 · 暂无在线同步设备"));
+        auto live = store.liveItems();
+        std::stable_sort(live.begin(), live.end(), [](const auto& a, const auto& b) { return a.item.when > b.item.when; });
+        const bool same = live.size() == 2 &&
+            ClipboardStore::stableId(live[0].item) == ClipboardStore::stableId(live[1].item);
+        for (const auto& entry : live) {
+            const auto id = ClipboardStore::stableId(entry.item);
+            if (shown.contains(id))
+                continue;
+            shown.insert(id);
+            const auto source = same ? QStringLiteral("本机与局域网 · 当前")
+                : entry.item.fromLan ? QStringLiteral("局域网 · 当前") : QStringLiteral("本机 · 当前");
+            itemRow(entry.item, QStringLiteral("clip:live:") + ClipboardStore::liveId(entry.item), entry.thumbnail, source);
+        }
+    } else {
+        addSection(QStringLiteral("完整记录 · 按 Esc 返回 · 支持按文本或来源筛选"));
+    }
+    const int limit = history ? m_clipHistoryLimit : 5;
+    int hits = 0;
+    const auto now = QDateTime::currentDateTime();
+    for (const auto& item : store.items()) {
+        const auto id = ClipboardStore::stableId(item);
+        if (shown.contains(id) || ClipboardStore::expired(item, store.keepDays(), now) ||
+            (fromLan && *fromLan != item.fromLan) ||
+            (!filter.isEmpty() && (item.isImage || !item.text.contains(filter, Qt::CaseInsensitive))))
+            continue;
+        if (++hits > limit)
+            break;
+        shown.insert(id);
+        itemRow(item, QStringLiteral("clip:item:") + id);
+    }
+    if (hits == 0 && (history || shown.isEmpty()))
+        info(history ? QStringLiteral("没有匹配的历史记录") : QStringLiteral("暂无剪贴板内容"),
+             store.enabled() ? QString{} : QStringLiteral("可在剪贴板插件设置中开启记录"));
+    if (!history || hits > limit) {
+        SearchResult row;
+        row.kind = SearchResult::Command;
+        row.title = history ? QStringLiteral("加载更多") : QStringLiteral("打开完整记录");
+        row.subtitle = history ? QString{} : QStringLiteral("Enter 恢复 · Ctrl+Enter 粘贴 · 完整记录支持筛选");
+        row.icon = letterIcon(QStringLiteral("历"), QColor(90, 112, 159));
+        row.target = history ? QStringLiteral("clip:next") : QStringLiteral("clip:more");
+        addItem(row);
+    }
+}
+
+bool SearchWindow::restoreClipboardResult(const QString& target)
+{
+    const auto alias = HotaruNativeHost::clipboardSearchAlias();
+    const bool inView = !alias.isEmpty() &&
+        (m_clipHistoryAlias == alias || halfWidth(m_input->text()).trimmed().compare(alias, Qt::CaseInsensitive) == 0);
+    bool ok = false;
+    if (inView && target.startsWith(QLatin1String("clip:live:"))) {
+        ok = ClipboardStore::instance().restoreLive(target.mid(10));
+    } else if (inView && target.startsWith(QLatin1String("clip:item:"))) {
+        ok = ClipboardStore::instance().restore(target.mid(10));
+    }
+    if (!ok) {
+        runSearch();
+        const auto message = QStringLiteral("这条剪贴板记录已不可用，请重新选择。");
+        setStatus(message);
+        QToolTip::showText(m_input->mapToGlobal(QPoint(0, m_input->height())), message, m_input);
+    }
+    return ok;
+}
+
 QString SearchWindow::currentCommandTarget() const
 {
     const int row = m_list->currentRow();
@@ -2124,28 +2349,29 @@ QString SearchWindow::currentCommandTarget() const
 bool SearchWindow::pasteClipToPrevious()
 {
     const QString target = currentCommandTarget();
-    if (!target.startsWith(QLatin1String("clip:")))
+    if (!target.startsWith(QLatin1String("clip:item:")) && !target.startsWith(QLatin1String("clip:live:")))
         return false;
-    bool ok = false;
-    const int n = target.mid(5).toInt(&ok);
-    if (!ok)
-        return false;
-    ClipboardStore::instance().restore(n);
+    if (!restoreClipboardResult(target))
+        return true;
     hide();
-    auto* fg = reinterpret_cast<HWND>(m_prevFg);
-    if (!fg || !IsWindow(fg))
+    auto* fg = reinterpret_cast<HWND>(std::exchange(m_prevFg, WId{}));
+    if (!fg || fg == reinterpret_cast<HWND>(winId()) || !IsWindow(fg))
         return true;                      // 找不到原窗口就只放回剪贴板，别乱发按键
     const DWORD fgThread = GetWindowThreadProcessId(fg, nullptr);
     const DWORD cur = GetCurrentThreadId();
     const bool attached = fgThread && fgThread != cur && AttachThreadInput(cur, fgThread, TRUE);
     SetForegroundWindow(fg);
+    if (GetForegroundWindow() != fg) {
+        if (attached)
+            AttachThreadInput(cur, fgThread, FALSE);
+        return true;
+    }
     keybd_event(VK_CONTROL, 0, 0, 0);
     keybd_event('V', 0, 0, 0);
     keybd_event('V', 0, KEYEVENTF_KEYUP, 0);
     keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYUP, 0);
     if (attached)
         AttachThreadInput(cur, fgThread, FALSE);
-    m_prevFg = 0;
     return true;
 }
 
@@ -2213,79 +2439,61 @@ void SearchWindow::activateRow(int row)
         break;
     }
     case SearchResult::Command: {
-        if (r.target == "rescan") {
+        if (r.target == QLatin1String("rescan")) {
             setStatus("正在重新扫描，完成后会自动刷新…");
             startScan(false, true);
-        } else if (r.target == QLatin1String("power:hibernate")
-                   || r.target == QLatin1String("power:shutdown")) {
-            // 动手之前不弹确认框（他要的就是"回车直接执行"），但**失败必须就地写在提示行上、
-            // 窗口不许收** —— "按了没反应"是这程序里最难查的形状。
-            const bool hib = r.target.endsWith(QLatin1String("hibernate"));
-            const QString err = hib ? SysTools::hibernateNow() : SysTools::shutDownNow();
-            if (err.isEmpty()) {
-                Utils::log(QStringLiteral("power: %1 已叫起来（回车直达）")
-                               .arg(hib ? QStringLiteral("休眠") : QStringLiteral("关机")));
-                hide();
-            } else {
-                Utils::log(QStringLiteral("power: %1").arg(err));
-                setStatus(err);
-            }
         } else if (r.target.startsWith(QLatin1String("tool:"))) {
-            // 工具就是 DLL 插件：先弹设置页，再展开那张卡；r.extra 有内容就顺手递给那页
+            const auto id = r.target.mid(5);
+            const auto& known = PluginHost::shortcuts();
+            const bool managed = std::any_of(known.cbegin(), known.cend(), [&](const auto& item) { return item.id == id; });
+            if (PluginHost::isDisabled(id) || PluginHost::isRetired(id) ||
+                (managed && !PluginHost::shortcutAvailable(id))) {
+                runSearch();
+                break;
+            }
             hide();
-            openTool(r.target.mid(5), r.extra);
+            openTool(id, r.extra);
         } else if (r.target.startsWith(QLatin1String("clip:"))) {
-            const QString arg = r.target.mid(5);
-            if (arg == QLatin1String("on")) {
-                ClipboardStore::instance().setEnabled(true);
-                setStatus(QStringLiteral("已开始记录剪贴板（设置 → 配置 里可以关掉）"));
+            const auto alias = HotaruNativeHost::clipboardSearchAlias();
+            if (alias.isEmpty()) {
                 runSearch();
-            } else if (arg == QLatin1String("clear")) {
-                ClipboardStore::instance().clear();
-                setStatus(QStringLiteral("剪贴板历史已清空"));
+                break;
+            }
+            if (r.target == QLatin1String("clip:more") &&
+                halfWidth(m_input->text()).trimmed().compare(alias, Qt::CaseInsensitive) == 0) {
+                m_clipHistoryAlias = alias;
+                m_clipHistoryLimit = 30;
+                m_input->setPlaceholderText(QStringLiteral("筛选历史：文本、本机、局域网"));
+                m_input->clear();
+                m_input->setFocus();
                 runSearch();
-            } else if (arg != QLatin1String("none")) {
-                ClipboardStore::instance().restore(arg.toInt());
+            } else if (r.target == QLatin1String("clip:next") && m_clipHistoryAlias == alias) {
+                m_clipHistoryLimit = qMin(ClipboardStore::kMaxItems, m_clipHistoryLimit + 30);
+                runSearch();
+            } else if (restoreClipboardResult(r.target)) {
                 hide();
             }
         }
         break;
     }
-    case SearchResult::PluginEntry: {
-        m_input->setText("init " + r.target + " ");
-        m_input->setFocus();
-        break;
-    }
-    case SearchResult::PluginItem: {
-        // r.target = 插件 id, r.extra = 组件 label
-        const QString key = r.target + "|" + r.extra;
-        DevItem it = m_detectItems.value(key);
-        if (it.ok) {
-            m_detecting.remove(r.target);
-            m_detectItems.remove(key);
+    case SearchResult::NativePeer: {
+        if (!HotaruNativeHost::enabled(QStringLiteral("lan-files"))) {
             runSearch();
-        } else if (!it.wingetId.isEmpty()) {
-            QString err;
-            DevEnv::runInstall(this, it, &err);
-            m_detectItems.remove(key);
-            setStatus("安装完成或取消后，按 Enter 重新检测");
-            runSearch();
-        } else if (!it.note.isEmpty()) {
-            setStatus(it.note);
-        }
-        break;
-    }
-    case SearchResult::RegIssue: {
-        const int issueIdx = r.target.toInt();
-        if (issueIdx < 0 || issueIdx >= m_regIssues.size())
             break;
-        QString err;
-        if (RegClean::deleteIssue(m_regIssues[issueIdx], &err)) {
-            setStatus("已删除并备份。重新扫描中…");
-        } else {
-            setStatus(err);
         }
-        runSearch();
+        const QByteArray peerId = QByteArray::fromBase64(r.target.toLatin1());
+        if (peerId.isEmpty()) {
+            setStatus(QStringLiteral("设备标识无效，无法发送文件。"));
+            break;
+        }
+        const auto peers = HotaruNativeHost::peers(kHotaruFeatureFiles);
+        if (std::none_of(peers.cbegin(), peers.cend(), [&](const HotaruNativePeer& peer) { return peer.id == peerId; })) {
+            runSearch();
+            setStatus(QStringLiteral("目标设备已离线或关闭文件分享"));
+            break;
+        }
+        hide();
+        openNativePlugin(QLatin1String(kHotaruLanFilesId), peerId);
         break;
     }
     case SearchResult::Info:
@@ -2293,285 +2501,9 @@ void SearchWindow::activateRow(int row)
     }
 }
 
-// ---------- init：开发环境 ----------
-
-void SearchWindow::handleInit(const QString& arg)
-{
-    const QVector<DevPlugin> plugins = DevEnv::loadPlugins();
-
-    if (arg.isEmpty()) {
-        addSection("── 开发环境插件 ──");
-        for (const DevPlugin& p : plugins) {
-            SearchResult r;
-            r.kind = SearchResult::PluginEntry;
-            r.title = p.name;
-            r.subtitle = QString("init %1 · %2 个组件 · Enter 查看")
-                             .arg(p.id).arg(p.items.size());
-            r.target = p.id;
-            r.icon = letterIcon(p.name, colorForKind(p.id));
-            addItem(r);
-        }
-        SearchResult tip;
-        tip.kind = SearchResult::Info;
-        tip.actionable = false;
-        tip.title = "插件定义在 %APPDATA%\\ltool\\plugins，可自行添加";
-        addItem(tip);
-        return;
-    }
-
-    // 按 id 精确/前缀匹配插件
-    const DevPlugin* found = nullptr;
-    for (const DevPlugin& p : plugins)
-        if (p.id.compare(arg, Qt::CaseInsensitive) == 0)
-            found = &p;
-    if (!found) {
-        QVector<const DevPlugin*> pref;
-        for (const DevPlugin& p : plugins)
-            if (p.id.startsWith(arg, Qt::CaseInsensitive))
-                pref.append(&p);
-        if (pref.size() == 1)
-            found = pref.first();
-    }
-    if (!found) {
-        QStringList ids;
-        for (const DevPlugin& p : plugins)
-            ids.append(p.id);
-        SearchResult r;
-        r.kind = SearchResult::Info;
-        r.actionable = false;
-        r.title = QString("未找到插件：%1").arg(arg);
-        r.subtitle = ids.isEmpty() ? QString() : "可用插件：" + ids.join(", ");
-        addItem(r);
-        return;
-    }
-
-    DevPlugin p = *found;
-    addSection(QString("── %1 (init %2) ──").arg(p.name, p.id));
-
-    // 检查已有检测结果的覆盖情况：全部有结果 → 展示；部分缺失 → 展示+补检
-    int cachedCount = 0;
-    for (const DevItem& it : p.items) {
-        if (m_detectItems.contains(p.id + "|" + it.label))
-            ++cachedCount;
-    }
-    const bool allCached = cachedCount == p.items.size();
-    const bool someCached = cachedCount > 0;
-
-    for (const DevItem& it : p.items) {
-        const QString key = p.id + "|" + it.label;
-        SearchResult r;
-        if (m_detectItems.contains(key)) {
-            const DevItem det = m_detectItems.value(key);
-            r.kind = SearchResult::PluginItem;
-            r.title = it.label;
-            r.target = p.id;
-            r.extra = it.label;
-            r.icon = letterIcon(det.ok ? "✓" : "!",
-                                det.ok ? QColor(46, 160, 88) : QColor(214, 128, 15));
-            if (det.ok) {
-                r.subtitle = "已安装 · " + det.version;
-            } else if (!det.wingetId.isEmpty()) {
-                r.subtitle = QString("未安装 · Enter 用 winget 安装 (%1)").arg(det.wingetId);
-            } else {
-                r.subtitle = det.note.isEmpty() ? "未检测到" : det.note;
-            }
-        } else {
-            r.kind = SearchResult::Info;
-            r.actionable = false;
-            r.title = it.label;
-            r.subtitle = someCached ? "检测中…" : "检测中…";
-        }
-        addItem(r);
-    }
-    if (allCached) {
-        SearchResult tip;
-        tip.kind = SearchResult::Info;
-        tip.actionable = false;
-        tip.title = "Enter：已安装项重新检测 / 缺失项安装";
-        addItem(tip);
-        return;
-    }
-    if (m_detecting.contains(p.id))
-        return;
-    m_detecting.insert(p.id);
-
-    const int run = ++m_detectRun;
-    const QString id = p.id;
-    auto future = QtConcurrent::run([p]() mutable -> QHash<QString, DevItem> {
-        DevEnv::detect(&p);
-        QHash<QString, DevItem> map;
-        for (const DevItem& it : p.items)
-            map.insert(p.id + "|" + it.label, it);
-        return map;
-    });
-    auto* watcher = new QFutureWatcher<QHash<QString, DevItem>>(this);
-    connect(watcher, &QFutureWatcher<QHash<QString, DevItem>>::finished, this,
-            [this, watcher, run, id] {
-                watcher->deleteLater();
-                if (run != m_detectRun)
-                    return;
-                m_detecting.remove(id);
-                const QHash<QString, DevItem> res = watcher->result();
-                for (auto it = res.begin(); it != res.end(); ++it)
-                    m_detectItems.insert(it.key(), it.value());
-                const QString cur = m_input->text();
-                if (cur.section(' ', 0, 0).compare("init", Qt::CaseInsensitive) == 0)
-                    runSearch();
-            });
-    watcher->setFuture(future);
-}
-
-// ---------- path：环境变量 ----------
-
-void SearchWindow::handlePath(const QString& rest)
-{
-    const QString t = rest.trimmed();
-    if (t.startsWith("add", Qt::CaseInsensitive)) {
-        QString dir = t.mid(3).trimmed();
-        dir.remove('"');
-        if (dir.isEmpty()) {
-            SearchResult r;
-            r.kind = SearchResult::Info;
-            r.actionable = false;
-            r.title = "用法：path add <目录>";
-            addItem(r);
-            return;
-        }
-        QString err;
-        const bool ok = EnvPath::addToUserPath(dir, &err);
-        SearchResult r;
-        r.kind = SearchResult::Info;
-        r.actionable = false;
-        r.title = ok ? QString("已加入用户 PATH：%1").arg(QDir::toNativeSeparators(dir))
-                     : err;
-        r.subtitle = ok ? "对新开的终端/程序生效（已广播 WM_SETTINGCHANGE）" : QString();
-        addItem(r);
-        return;
-    }
-    if (t.startsWith("del", Qt::CaseInsensitive)) {
-        QString dir = t.mid(3).trimmed();
-        dir.remove('"');
-        QString err;
-        const bool ok = EnvPath::removeFromUserPath(dir, &err);
-        SearchResult r;
-        r.kind = SearchResult::Info;
-        r.actionable = false;
-        r.title = ok ? QString("已从 PATH 移除：%1").arg(dir) : err;
-        addItem(r);
-        return;
-    }
-
-    // path / path list：列出
-    const QStringList entries = EnvPath::userPathEntries();
-    addSection(QString("── 用户 PATH（共 %1 项）──").arg(entries.size()));
-    for (const QString& e : entries) {
-        SearchResult r;
-        r.kind = SearchResult::Info;
-        r.actionable = false;
-        r.title = Platform::expandEnv(e);
-        r.subtitle = e == r.title ? QString() : e;
-        addItem(r);
-    }
-    SearchResult tip;
-    tip.kind = SearchResult::Info;
-    tip.actionable = false;
-    tip.title = "path add <目录> 添加 · path del <目录> 移除 · 应用结果右键也可加入 PATH";
-    addItem(tip);
-}
-
-// ---------- reg：注册表整理 ----------
-
-void SearchWindow::handleReg(const QString& rest)
-{
-    const QString t = rest.trimmed();
-
-    if (t.startsWith("clean", Qt::CaseInsensitive)) {
-        // 命令行里只自动删"安全"级（启动项/缓存/App Paths/遗留键）；
-        // 卸载记录、服务、文件关联、COM 这些要人去分析页看着明细勾，别一句话盲删上百个键
-        QVector<RegIssue> all = RegClean::quickScan();
-        QVector<RegIssue> issues;
-        int held = 0;
-        for (const RegIssue& it : all) {
-            if (it.deletable() && it.risk == RegIssue::Risk::Safe)
-                issues.append(it);
-            else if (it.deletable())
-                ++held;
-        }
-        if (issues.isEmpty()) {
-            SearchResult r;
-            r.kind = SearchResult::Info;
-            r.actionable = false;
-            r.title = held > 0
-                ? QString("没有可以自动删的项（另有 %1 项属于谨慎级，去 工具 → 注册表分析 里看明细）").arg(held)
-                : QString("注册表很干净，没有发现残留项");
-            addItem(r);
-            return;
-        }
-        int okCount = 0;
-        QStringList fails;
-        for (const RegIssue& it : issues) {
-            QString err;
-            if (RegClean::deleteIssue(it, &err))
-                ++okCount;
-            else
-                fails.append(QString("%1：(%2)").arg(it.title, err));
-        }
-        SearchResult r;
-        r.kind = SearchResult::Info;
-        r.actionable = false;
-        r.title = QString("已清理 %1/%2 项（每项删除前已自动备份 .reg）")
-                      .arg(okCount).arg(issues.size());
-        r.subtitle = QString("备份目录：%1%2")
-                         .arg(QDir::toNativeSeparators(Utils::backupsDir()),
-                              held > 0
-                                  ? QString(" · 另有 %1 项谨慎级没动，去 工具 → 注册表分析 里勾").arg(held)
-                                  : QString());
-        addItem(r);
-        for (const QString& f : fails) {
-            SearchResult fr;
-            fr.kind = SearchResult::Info;
-            fr.actionable = false;
-            fr.title = f;
-            addItem(fr);
-        }
-        return;
-    }
-
-    // reg / reg scan：列出问题。搜索框里只做快的那几类，
-    // COM 组件要遍历上万个键，留给「工具 → 注册表分析」那页去跑
-    const QVector<RegIssue> issues = RegClean::quickScan();
-    addSection("── 注册表体检 ──");
-    if (issues.isEmpty()) {
-        SearchResult r;
-        r.kind = SearchResult::Info;
-        r.actionable = false;
-        r.title = "未发现无效项（卸载残留 / 启动项失效 / 缓存残留）";
-        addItem(r);
-        return;
-    }
-    SearchResult head;
-    head.kind = SearchResult::Info;
-    head.actionable = false;
-    head.title = QString("发现 %1 个无效项 · Enter 删除单项（自动备份）· reg clean 全部清理")
-                     .arg(issues.size());
-    addItem(head);
-
-    m_regIssues = issues;
-    for (int i = 0; i < issues.size(); ++i) {
-        const RegIssue& it = issues[i];
-        SearchResult r;
-        r.kind = SearchResult::RegIssue;
-        r.title = it.title;
-        r.subtitle = QString("[%1] %2").arg(RegClean::categoryLabel(it), it.detail);
-        r.target = QString::number(i);
-        r.icon = letterIcon("C", QColor(214, 69, 69));
-        addItem(r);
-    }
-}
-
 // ---------- 扫描 ----------
 
-void SearchWindow::startScan(bool quiet, bool forceDeep)
+void SearchWindow::startScan(bool quiet, bool forceDeep, bool sequential)
 {
     if (!m_scanning.testAndSetRelaxed(0, 1))
         return;
@@ -2581,20 +2513,23 @@ void SearchWindow::startScan(bool quiet, bool forceDeep)
         return list;
     });
     auto* watcher = new QFutureWatcher<QVector<AppEntry>>(this);
-    connect(watcher, &QFutureWatcher<QVector<AppEntry>>::finished, this, [this, watcher, quiet] {
+    connect(watcher, &QFutureWatcher<QVector<AppEntry>>::finished, this, [this, watcher, quiet, sequential, forceDeep] {
         m_apps = watcher->result();
         m_apps += SysTools::systemTools();
         watcher->deleteLater();
         m_scanning.storeRelaxed(0);
         Utils::log(QString("scan finished: %1 apps").arg(m_apps.size()));
         watchAppDirs();     // 安装器常新建子目录，扫完补挂一次监视
+        if (sequential)
+            FileIndexer::instance().reindexAsync(forceDeep);
         if (!quiet) {
             setStatus(QString("扫描完成：应用 %1 · 文件索引进行中…").arg(m_apps.size()));
             runSearch();
         }
     });
     watcher->setFuture(future);
-    FileIndexer::instance().reindexAsync(forceDeep);
+    if (!sequential)
+        FileIndexer::instance().reindexAsync(forceDeep);
     if (!quiet)
         setStatus("正在扫描桌面与开始菜单…");
 }
@@ -2692,14 +2627,6 @@ void SearchWindow::openContextMenu(const QPoint& globalPos)
         });
         m_menu->addSeparator();
         m_menu->addAction(QStringLiteral("打开所在位置"), this, [where] { Platform::reveal(where); });
-        if (!r.target.isEmpty()) {
-            const QString dir = QFileInfo(r.target).absolutePath();
-            m_menu->addAction(QStringLiteral("把程序目录加入 PATH"), this, [this, dir] {
-                QString err;
-                const bool ok = EnvPath::addToUserPath(dir, &err);
-                setStatus(ok ? QStringLiteral("已加入 PATH：%1").arg(dir) : err);
-            });
-        }
         m_menu->addAction(QStringLiteral("复制路径"), this, [where] {
             QGuiApplication::clipboard()->setText(QDir::toNativeSeparators(where));
         });

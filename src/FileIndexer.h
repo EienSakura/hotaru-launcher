@@ -48,7 +48,11 @@ public:
 
     // forceDeep=true 跳过增量，直接重扫全盘快照
     void reindexAsync(bool forceDeep = false);
+    bool restoreCachedSnapshot();
+    bool isIndexing() const { return m_running.loadRelaxed() != 0; }
     QVector<FileEntry> search(const QString& query, int limit) const;
+    QVector<FileEntry> search(const QString& query, int limit, int reserveFolders) const;
+    static bool searchSelftest();
 
 signals:
     void indexingFinished(int total);

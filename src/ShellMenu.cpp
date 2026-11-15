@@ -1,4 +1,5 @@
 #include "ShellMenu.h"
+#include "BuildChannel.h"
 
 #include "PluginHost.h"
 
@@ -193,6 +194,8 @@ bool installed()
 
 QString install()
 {
+    if (BuildChannel::development)
+        return QStringLiteral("开发版不修改资源管理器菜单。");
     const QString exe = selfPath();
     if (exe.isEmpty())
         return QStringLiteral("拿不到 Hotaru 自己的路径，没法写右键菜单");
@@ -237,6 +240,8 @@ QString install()
 
 QString remove()
 {
+    if (BuildChannel::development)
+        return QStringLiteral("开发版不修改资源管理器菜单。");
     deleteTree(HKEY_CURRENT_USER, hkcuPath(false));
     deleteTree(HKEY_CURRENT_USER, hkcuPath(true));
     const bool gone = !installed();
@@ -267,6 +272,8 @@ bool providerPresent()
 
 bool intent()
 {
+    if (BuildChannel::development)
+        return false;
     // 缺键时**以注册表现状为准**：老机器上右键里已经有 ltool（那时还没有这个开关），
     // 默认成 false 会在下次启动时把人家正在用的菜单悄悄撤掉。
     return QSettings(intentPath(), QSettings::IniFormat)
@@ -288,6 +295,8 @@ bool intentExplicitlySet()
 
 QString syncWithPlugin()
 {
+    if (BuildChannel::development)
+        return {};
     // 先认领意图再算该不该写：缺键时那个默认值以前读的是注册表现状，而现状是这条规则自己
     // 删出来的 —— 卸载一次就把"想要"永久锁成"不想要"（他报的"装了右键动作，文件夹右键里没有 ltool"）。
     // 放在最前面、且只在这里放一次，四个调用点（启动 / 装 / 卸 / 禁用启用）都走这同一条。

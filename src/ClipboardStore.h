@@ -2,14 +2,17 @@
 
 #include <QDateTime>
 #include <QIcon>
+#include <QImage>
+#include <optional>
 #include <QObject>
 #include <QString>
 #include <QVector>
 
-// 剪贴板历史。默认关闭的持久开关（clipboard/enable）：勾上才在后台收，
-// 因为"把你复制过的 every thing 存盘"是改行为的功能，不该默认打开。
+// 剪贴板插件可用时默认记录；保留已有 clipboard/enable 显式设置。
 // 文本直接进 clipboard.json；图片落 clipimg/<sha1>.png，json 里只存路径 + 尺寸。
 // 留多少由两条上限决定：200 条封顶，加上 clipboard/keepDays 那个天数（默认 7 天，0=不限）。
+class QMimeData;
+
 class ClipboardStore : public QObject {
     Q_OBJECT
 public:
@@ -17,6 +20,7 @@ public:
         QDateTime when;
         QString hash;          // 内容指纹，用来去重和给图片文件名
         bool isImage = false;
+        bool fromLan = false;
         QString text;
         QString imagePath;
         int w = 0, h = 0;
@@ -32,6 +36,16 @@ public:
     static ClipboardStore& instance();
 
     void start();                                   // 挂信号 + 兜底轮询（幂等）
+    void setAvailable(bool available);
+    void recordReceived(const QMimeData& mime);
+    struct Live {
+        Item item;
+        QImage thumbnail;
+        QImage image;
+    };
+    QVector<Live> liveItems();
+    static QString liveId(const Item& item);
+    bool restoreLive(const QString& id);
     bool enabled() const { return m_enabled; }
     void setEnabled(bool on);                       // 立刻持久化；关掉只停止收集，历史保留
 
@@ -43,12 +57,7 @@ public:
     // 时间戳读不出来的条目按"超龄"处理：界面本来就画不出它是哪天复制的。
     static bool expired(const Item& it, int keepDays, const QDateTime& now);
 
-    // 一张图片的 40px 缩略图落在哪儿（和原图同一个目录、同一次清理，后缀 .t40.png）。
-    // 为什么要有这东西：列表里每一行的图标原来都走 `QPixmap(整图)` + Smooth 缩放 ——
-    // 2026-10-19 实测他那份 51 张图（合计 51.6 百万像素）一趟要 **632ms**，而这张页
-    // 每次被看见、每敲一个过滤字都要重铺一遍列表，那几百毫秒就挂在 GUI 线程上。
-    // 缩略图落盘之后同款趟是 **10ms**（63×）。它跟着原图一起进 prune() 那张 keep 表，
-    // 原图被撤了小的也当孤儿扫走 —— 不另开目录，免得"孤儿怎么撤"要写第二遍。
+    // 缩略图随原图一同清理，列表避免解码历史原图。
     static QString thumbPath(const QString& imagePath);
 
     // json 里记的是**绝对路径**（1.4.0 把数据目录搬进软件目录之前，它一直在 `%APPDATA%\ltool`）。
@@ -66,7 +75,8 @@ public:
     static QString keepKey(const QString& path);
 
     const QVector<Item>& items() const { return m_items; }
-    void restore(int index);                        // 放回剪贴板
+    bool restore(const QString& stableId);
+    static QString stableId(const Item& item);
     void remove(int index);
     void clear();
     QIcon iconFor(const Item& it) const;
@@ -77,17 +87,25 @@ public:
     // 判据不公开它就量不到。（页面本来也不该自己 new 一份历史。）
     void load();
 
+signals:
+    void changed();
+
 private:
     explicit ClipboardStore(QObject* parent = nullptr) : QObject(parent) {}
     void save() const;
-    void capture();
+    void capture(const QMimeData* mime);
+    void observeLive(bool signaled = false);
+    static Live makeLive(const QMimeData& mime);
     void prune();
 
     QVector<Item> m_items;
-    bool m_enabled = false;
+    std::optional<Live> m_liveLocal, m_liveLan;
+    std::optional<quint32> m_liveSequence;
+    bool m_readingLive = false;
+    bool m_enabled = true;
+    bool m_available = false;
     bool m_started = false;
     int m_keepDays = kDefaultKeepDays;
     QDate m_sweptOn;        // 上一次按天裁剪是哪一天：轮询 2 秒一次，按天这件事一天扫一次就够
-    QString m_lastHash;
     quint32 m_seq = 0;      // 剪贴板序列号：没变就一行都不做（轮询本来 2 秒一次）
 };
