@@ -271,9 +271,9 @@ jobs:
           # 之后谁改了那张页都没人数 —— #94 那次（--storenet 四条红没人看见）是同一个形状。
           # 三条都离线、都不 show 窗口，加起来约 1.2 秒；linuxdo 与 random 走沙箱数据目录，
           # grid 那条自己算临时路径自己删（`src/main.cpp` 里 `--gridtest` 那一段写明了这一点）。
-          tests=(--smoke --about --cfgcheck --appdirs --pinyin --seamtest --diskbranch --mfttest --storeexit --storetest --pathcfg)
+          tests=(--smoke --about --cfgcheck --appdirs --pinyin --seamtest --diskbranch --mfttest --storetest --pathcfg --hotarusearchtest)
           if [ "$HOTARU_PACKAGE_PLUGINS" = "ON" ]; then
-            tests+=(--plugintest --rowmenu --username --gridtest --linuxdotest --randtest --startuptest)
+            tests+=(--plugintest --rowmenu --username --gridtest --linuxdotest --randtest --startuptest --storeexit)
           fi
           for f in "${tests[@]}"; do
             echo "===== $f ====="

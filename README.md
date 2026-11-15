@@ -4,7 +4,7 @@
 
 [使用指南](docs/usage.md) · [功能变更](docs/changes.md) · [开发说明](docs/development.md)
 
-**当前版本：1.0.0** · [项目仓库](https://github.com/EienSakura/hotaru-launcher) · [版本发布](https://github.com/EienSakura/hotaru-launcher/releases)
+**当前版本：1.0.2** · [项目仓库](https://github.com/EienSakura/hotaru-launcher) · [版本发布](https://github.com/EienSakura/hotaru-launcher/releases)
 
 ## 界面预览
 
@@ -40,7 +40,7 @@ Hotaru 延续 ltool 的全局热键、应用与文件搜索、拼音匹配、网
 
 “常驻”仅指固定显示的启动项，不维持后台进程。重命名、分组和移除只修改面板配置，不改动源文件或磁盘目录。已有配置和插件文件会保留，默认不捆绑或自动安装工具插件，插件自动更新默认关闭。
 
-**插件兼容说明：** 当前工具插件均来自上游 ltool，插件商店也沿用上游渠道；Hotaru 暂未进行插件兼容性测试，使用前需要自行适配和验证。默认安装包不含插件，需要时额外打包。
+**插件：** 在「设置 → 插件」管理已安装插件、打开官方仓库或导入本地包。局域网连接、剪贴板共享和文件分享目前是预览插件，见 [Hotaru 插件仓库](https://github.com/EienSakura/Hotaru-Plugins#readme)。兼容插件商店继续使用上游 ltool 渠道，需自行验证兼容性。默认安装包不含插件。
 
 主题包
 
@@ -50,7 +50,7 @@ Hotaru 延续 ltool 的全局热键、应用与文件搜索、拼音匹配、网
 
 ## 快速开始
 
-1. 按 [开发说明](docs/development.md) 构建，在可写目录运行 `Hotaru.exe`。
+1. 从 [最新发布](https://github.com/EienSakura/hotaru-launcher/releases/latest) 下载 Windows x64 安装包。也可按 [开发说明](docs/development.md) 自行构建。
 2. 按 `Alt+Space` 或点击托盘图标呼出启动器。
 3. 在空白格右键添加软件或文件夹，也可从搜索结果快捷固定。
 4. 点击齿轮设置主题、网格大小、呼出模式和页面记忆。
@@ -70,6 +70,7 @@ Hotaru 延续 ltool 的全局热键、应用与文件搜索、拼音匹配、网
 | [使用指南](docs/usage.md) | 面板、分页、分组、主题及配置备份。 |
 | [功能变更](docs/changes.md) | Hotaru 相对上游的新增功能和修复。 |
 | [开发说明](docs/development.md) | 构建、插件兼容、验证和发布现状。 |
+| [插件仓库与分发](docs/plugin-repository.md) | 插件管理、签名目录、镜像和独立打包。 |
 | [主题包设计规范](docs/theme-package.md) | ZIP 结构、清单字段、外框布局、动画及发布方式。 |
 | [上游文档](https://github.com/mateo-ki/ltool#readme) | ltool 原有功能与工具插件说明。 |
 
@@ -77,7 +78,6 @@ Hotaru 延续 ltool 的全局热键、应用与文件搜索、拼音匹配、网
 
 **1.0.0 是 Hotaru 的首个版本**，以 Windows 为主要支持平台。
 
-现有工具插件均为上游 ltool 插件，Hotaru 暂未进行兼容性测试。
 
 ## 许可证与致谢
 

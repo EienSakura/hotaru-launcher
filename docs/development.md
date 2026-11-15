@@ -4,7 +4,7 @@
 
 ## 技术栈与模块
 
-当前开发目标为 Windows x64，使用 C++20、Qt 6.10.2、CMake 3.24及以上版本和Visual Studio 2022。Qt、libarchive和bit7z通过 `vcpkg.json` 清单管理；版本信息从 `ltool.iss` 读取，Hotaru 首版为 `1.0.0`。
+当前开发目标为 Windows x64，使用 C++20、Qt 6.10.2、CMake 3.24及以上版本和Visual Studio 2022。Qt、libarchive和bit7z通过 `vcpkg.json` 清单管理；版本信息从 `ltool.iss` 读取，当前发布版本为 `1.0.2`。
 
 | 模块 | 职责 |
 | --- | --- |
@@ -213,4 +213,4 @@ CI 从 `tools/upstream-base.txt` 下载固定上游提交，仅用于插件版�
 
 ## 官方插件仓库
 
-仓库目录、发布、验签和本地导入说明见 [Hotaru 插件仓库](plugin-repository.md)。
+仓库目录、发布、验签和本地导入说明见 [Hotaru 插件仓库](plugin-repository.md)。正式版发布后可运行 `python tools/postrelease_check.py --tag v1.0.2` 核对公开安装包摘要。
