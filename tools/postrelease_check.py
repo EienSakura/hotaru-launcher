@@ -1,12 +1,11 @@
 """发完版对着**公开那一面**复验三件事（不看 CI 日志，直接打 GitHub 的公开 URL）：
 1. Release 说明里有没有家目录/用户名 —— 用的就是发版说明那把同一颗图案；
-2. 商店那条链是不是真活了：`releases/download/v<这一版>/plugins-index.json` 要 200，
-   且条目不少于**主仓库现在插件的颗数**（颗数现算 —— 写死 19 的那版，加一颗插件就变假红/假绿）；
+2. 默认安装器不附带插件；显式分发兼容插件时，复验清单已上传且条目数符合所发标签；
 3. `sha256.txt` 里安装包那一行，和 Release 资产 API 报的 digest 对不对得上。
 
     python tools/postrelease_check.py               # 量"HEAD 上最近那个 tag"那一版
     python tools/postrelease_check.py --tag v1.4.1  # 点名量某一版
-    python tools/postrelease_check.py 已经下好的.json  # 离线：拿那份 release JSON，不发请求
+    python tools/postrelease_check.py 已经下好的.json  # 离线：复用 release JSON，仍会拉取校验文件
 
 版本号以前钉死在 `v1.4.0`：发完 1.4.1 之后它还在复验上一版 —— 那是"绿了但量错了对象"，
 所以这里改成从 `git describe --tags` 问出来，不在这儿抄第二份。
@@ -15,12 +14,14 @@ import glob
 import importlib.util
 import json
 import os
+import re
 import subprocess
 import sys
 import time
 
 here = os.path.dirname(os.path.abspath(__file__))
 root = os.path.dirname(here)
+release_repo = 'EienSakura/hotaru-launcher'
 
 
 def get(url, tries=4):
@@ -35,7 +36,7 @@ def get(url, tries=4):
     revoke = ['--ssl-no-revoke'] if sys.platform == 'win32' else []
     last = ''
     for i in range(tries):
-        r = subprocess.run(['curl', '-sSL', '--max-time', '40'] + revoke + ['-o', '-', url],
+        r = subprocess.run(['curl', '-fsSL', '--max-time', '40'] + revoke + ['-o', '-', url],
                            capture_output=True, text=True, encoding='utf-8', errors='replace')
         if r.returncode == 0 and r.stdout.strip():
             return r.stdout
@@ -83,48 +84,57 @@ else:
     if not tag:
         print('PROBLEM 不知道要量哪一版（这里没有 tag，也没给 --tag）')
         sys.exit(1)
-    rel = json.loads(get('https://api.github.com/repos/mateo-ki/ltool/releases/tags/' + tag))
+    rel = json.loads(get(f'https://api.github.com/repos/{release_repo}/releases/tags/{tag}'))
 
-want = expected_plugins(tag)
-now = expected_plugins()
-print('量的是 %s 那一版（那次发出去 %d 颗插件；工作树现在 %d 颗）' % (tag or '（无名）', want, now))
+if not tag or rel.get('tag_name') != tag or rel.get('draft'):
+    print('PROBLEM 标签与正式发布不匹配')
+    sys.exit(1)
+
+assets = {asset['name']: asset for asset in rel.get('assets', [])}
 bad = 0
 
-# 1 说明里不许有家目录/用户名
+# 发布说明不得携带本机家目录。
 hits = m.USER_HOME_RE.findall(rel.get('body', '') or '')
 print('说明里带家目录的行=', len(hits))
-for h in hits[:3]:
-    print('   残留:', h[:120])
 bad += len(hits)
 
-# 2 商店那条链真活了
-url = 'https://github.com/mateo-ki/ltool/releases/download/%s/plugins-index.json' % tag
-try:
-    idx = json.loads(get(url))
-    plugins = idx.get('plugins', idx if isinstance(idx, list) else [])
-    print('商店清单：HTTP 200，条目=', len(plugins))
-    if len(plugins) < want:
-        print('   PROBLEM 清单只有 %d 条，而 %s 那一次构建有 %d 颗插件' % (len(plugins), tag, want))
+index_asset = assets.get('plugins-index.json')
+if index_asset:
+    try:
+        index = json.loads(get(index_asset['browser_download_url']))
+        plugins = index.get('plugins', [])
+        wanted = expected_plugins(tag)
+        print('兼容插件清单条目=', len(plugins))
+        if len(plugins) != wanted:
+            print('PROBLEM 清单条目数与标签中的兼容插件数不同：', wanted)
+            bad += 1
+    except (RuntimeError, ValueError, KeyError, AttributeError) as exc:
+        print('PROBLEM 兼容插件清单不可读：', exc)
         bad += 1
-except Exception as e:
-    print('PROBLEM 商店那条链还是不通：', e)
+elif any(name.startswith('ltool-') for name in assets):
+    print('PROBLEM 发布包含兼容插件资产但缺少清单')
     bad += 1
+else:
+    print('未分发兼容插件，符合默认安装包约定')
 
-# 3 sha256 对账
-setup = [a for a in rel.get('assets', []) if a['name'].endswith('-setup.exe')]
-shapath = [a for a in rel.get('assets', []) if a['name'] == 'sha256.txt']
-if setup and shapath:
-    txt = get(shapath[0]['browser_download_url'])
-    line = [l for l in txt.splitlines() if setup[0]['name'] in l]
-    api = (setup[0].get('digest') or '').replace('sha256:', '')
-    print('安装包=', setup[0]['name'])
-    print('  sha256.txt 那行:', (line[0][:90] if line else '没找到'))
-    print('  资产 API 的 digest:', api[:16], '...')
-    if not line or api.lower() not in line[0].lower():
-        print('   PROBLEM 两边对不上（说明里承诺了要对整批）')
+installer = f"Hotaru-{tag.removeprefix('v')}-setup.exe"
+setup = assets.get(installer)
+hashes = assets.get('sha256.txt')
+if setup and hashes:
+    try:
+        txt = get(hashes['browser_download_url'])
+        expected = re.findall(rf"^([0-9a-fA-F]{{64}})  {re.escape(installer)}$", txt, re.M)
+        actual = setup.get('digest') or ''
+        if len(expected) != 1 or actual.lower() != f'sha256:{expected[0].lower()}':
+            print('PROBLEM 安装包资产摘要与 sha256.txt 不一致')
+            bad += 1
+        else:
+            print('安装包 SHA-256 已核对：', installer)
+    except (RuntimeError, KeyError) as exc:
+        print('PROBLEM 校验表不可读：', exc)
         bad += 1
 else:
-    print('PROBLEM 缺 setup.exe 或 sha256.txt 资产')
+    print('PROBLEM 缺', installer, '或 sha256.txt 资产')
     bad += 1
 
 print('POSTRELEASE_BAD=%d' % bad)

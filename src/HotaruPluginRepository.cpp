@@ -1,5 +1,6 @@
 #include "HotaruPluginRepository.h"
 #include "BuildChannel.h"
+#include "DevEnv.h"
 #include "HotaruNativeHost.h"
 #include "PluginHost.h"
 #include "PluginStore.h"
@@ -750,6 +751,7 @@ bool planInstall(const QString& id, const Catalog& catalog, const Inventory& cur
 
 Client::Client(QObject* parent) : QObject(parent), m_network(new QNetworkAccessManager(this))
 {
+    DevEnv::applyProxy(m_network);
     readCache();
 }
 Catalog Client::catalog() const { return m_catalog; }
