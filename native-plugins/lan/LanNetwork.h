@@ -27,12 +27,24 @@ public:
         qint64 lastSeen = 0;
         qint64 firstSeen = 0;
         Phase phase = Phase::Waiting;
+        QString name;
         bool operator==(const Discovery&) const = default;
     };
     explicit Network(QObject* parent = nullptr);
     ~Network() override;
-    void start(QByteArrayView passcode);
+    void start(const QByteArray& identity);
     void stop();
+    void setCredentialLookup(std::function<QByteArray(const QByteArray&)> lookup);
+    QByteArray beginInvitation();
+    void setInvitationName(const QString& name);
+    void endInvitation();
+    void consumeInvitation();
+    bool invitationActive() const;
+    QByteArray invitationCode() const { return invitationActive() ? m_inviteCode : QByteArray{}; }
+    bool invitationInProgress() const { return m_inviteTimer.isActive(); }
+    QStringList localAddresses() const;
+    bool joinInvitation(const QHostAddress& address, const QByteArray& code, QString& error);
+    void forget(const QByteArray& id);
     void setCachedAddresses(const QList<QHostAddress>& addresses);
     QString status() const { return m_status; }
     QList<Discovery> discoveries() const;
@@ -43,6 +55,7 @@ signals:
     void disconnected(Peer* peer);
     void changed();
     void diagnostic(const QString& message);
+    void invitationFailed();
 
 private:
     friend struct NetworkSelftest;
@@ -68,10 +81,13 @@ private:
     bool registerAttempt(int iface, const QHostAddress& destination);
     bool registerProbe(const Address& endpoint, const QHostAddress& destination, bool manual = false);
     void classifyIncoming(QTcpSocket* socket, const Address& address);
-    void adopt(QTcpSocket* socket, const QHostAddress& source, QByteArray peerId);
+    void adopt(QTcpSocket* socket, const QHostAddress& source, QByteArray peerId,
+               QByteArray inviteCode = {});
+    bool connectCandidate(const Discovery& candidate, QByteArray inviteCode = {});
     void setStatus(QString value);
     void recordDiscovery(const QByteArray& id, const QHostAddress& address, quint16 port,
-                         int interfaceIndex, int features = 0);
+                         int interfaceIndex, int features = 0, QString name = {});
+    QByteArray advertisement(quint16 port) const;
     void sendAnnouncement(const Endpoint& endpoint, const QHostAddress& destination,
                           quint16 destinationPort);
 #ifdef Q_OS_WIN
@@ -83,7 +99,7 @@ private:
     void finishDnsRegistration(DnsRegistration* registration, DWORD status);
     void finishDnsBrowse(DnsBrowseContext* context);
     void resolveDnsService(const QString& name);
-    void adoptDnsEndpoint(const QHostAddress& source, quint16 port, const QByteArray& peerId);
+    void adoptDnsEndpoint(const QHostAddress& source, quint16 port, const QByteArray& peerId, int flags, const QString& name);
     static VOID WINAPI dnsBrowseCallback(DWORD status, PVOID context, PDNS_RECORD record);
     static VOID WINAPI dnsResolveCallback(DWORD status, PVOID context, PDNS_SERVICE_INSTANCE instance);
     static VOID WINAPI dnsRegisterCallback(DWORD status, PVOID context, PDNS_SERVICE_INSTANCE instance);
@@ -111,8 +127,12 @@ private:
     QHash<int, QList<qint64>> m_registerInterfaceAttempts;
     QList<qint64> m_totalAttempts;
     QList<qint64> m_registerTotalAttempts;
-    QByteArray m_ownId, m_passcode;
-    QString m_status, m_tcpError, m_udpError;
+    QByteArray m_ownId, m_inviteCode, m_joinCode;
+    QHostAddress m_joinAddress;
+    QTimer m_inviteTimer, m_joinTimer;
+    int m_inviteAttempts = 0;
+    std::function<QByteArray(const QByteArray&)> m_credential;
+    QString m_status, m_tcpError, m_udpError, m_invitationName;
     qint64 m_lastReject = -60000;
 };
 }

@@ -1,0 +1,10 @@
+/build/
+/dist/
+/signed-catalog/
+/.vs/
+/.env
+/.env.*
+__pycache__/
+*.user
+*.pem
+*.key

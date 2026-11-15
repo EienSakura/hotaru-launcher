@@ -6,7 +6,8 @@
 namespace HotaruLan {
 enum Wire : char {
     Hello = 1, Text = 2, Image = 3, Ping = 4, Pong = 5,
-    Offer = 10, Accept, Reject, Chunk, FileDone, AllDone, Received, Cancel
+    Offer = 10, Accept, Reject, Chunk, FileDone, AllDone, Received, Cancel,
+    PairHello = 20, PairKey, PairSaved, PairCommit, PairReceipt, PairReject
 };
 
 class Transfers final : public QObject {
@@ -22,7 +23,7 @@ public:
     QString pendingSummary() const;
     QStringList retryPaths() const { return m_retryPaths; }
     void sendOffer(Peer* peer, const QStringList& paths);
-    void accept(const QString& destination);
+    bool accept(const QString& destination, QString* error = nullptr);
     void decline();
     void cancelOutgoing();
     void cancelIncoming();

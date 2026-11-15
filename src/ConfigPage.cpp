@@ -2,7 +2,6 @@
 #include "BuildChannel.h"
 #include "platform/Autostart.h"
 #include "ShellMenu.h"
-#include "ClipboardStore.h"
 #include "DevEnv.h"
 #include "CaptureHistory.h"
 #include "LauncherTheme.h"
@@ -611,15 +610,6 @@ int dirItemCount(QListWidget* list)
     return n;
 }
 
-// 剪贴板那一格的状态行：条数 + 保留多久一起说，别让人以为 200 条是永远不倒的。
-QString clipInfoText()
-{
-    auto& cs = ClipboardStore::instance();
-    return QString("%1 条记录 · 保留 %2 · 图片存在 clipimg\\")
-        .arg(cs.items().size())
-        .arg(cs.keepDays() > 0 ? QString("%1 天").arg(cs.keepDays()) : QStringLiteral("不限（只按 200 条）"));
-}
-
 } // namespace
 
 ConfigPage::ConfigPage(QWidget* parent)
@@ -712,20 +702,11 @@ ConfigPage::ConfigPage(QWidget* parent)
     }
     m_proxy->setClearButtonEnabled(true);
     generalLay->addRow("下载代理：", m_proxy);
-    m_storeUrl = new QLineEdit(general);
-    m_storeUrl->setPlaceholderText(PluginStore::defaultIndexUrl());
-    m_storeUrl->setToolTip("插件商店要拉的那份 plugins-index.json。留空 = 用内置那条"
-                            "（沿用上游 ltool v1.5.0，未测试与 Hotaru 的适配情况，需自行适配）。\n"
-                            "要指到自己的测试源就填那里的地址；代理沿用上面那一行，清单和 dll 都走它。");
-    m_storeUrl->setClearButtonEnabled(true);
-    generalLay->addRow("插件清单地址：", m_storeUrl);
     m_storeMirrors = new QLineEdit(general);
     m_storeMirrors->setPlaceholderText(PluginStore::mirrorList());
-    m_storeMirrors->setToolTip("拉插件（清单和 dll）时**先**按这里每条前缀试一遍，走直连；"
-                               "都不成才轮到我们自己的下载代理，最后才是直连原始地址。\n"
-                               "多个用逗号分隔，留空 = 内置那两条（这台机器实测过还活着：gh-proxy.com、ghfast.top）。\n"
-                               "只有地址在 github 上才用到镜像（raw 那条和发版资产 releases/download 那条）"
-                               "—— 指到自己的服务器就不套镜像。");
+    m_storeMirrors->setToolTip("多个前缀用逗号分隔，留空使用内置镜像。\n"
+                               "兼容插件的 GitHub 下载和 Hotaru 直属插件 ZIP 都可以使用镜像。\n"
+                               "直属插件只接受 HTTPS 镜像；下载或校验失败时改试下一条，最后使用 GitHub。官方目录不走镜像。");
     m_storeMirrors->setClearButtonEnabled(true);
     generalLay->addRow("插件镜像前缀：", m_storeMirrors);
     // 默认**开**：他这句是"自动做 X"（2026-10-21「插件商店增加一个自动更新功能，一天自动更新一次」），
@@ -882,29 +863,6 @@ ConfigPage::ConfigPage(QWidget* parent)
     btnRow->addStretch(1);
     dataLay->addRow(btnRow);
 
-    auto* clip = new QGroupBox("剪贴板历史", this);
-    auto* clipLay = new QFormLayout(clip);
-    m_clip = new QCheckBox("记录我复制过的文本和图片（默认关闭）", clip);
-    m_clip->setToolTip("开启后 Hotaru 会在后台读剪贴板，把内容存到\n"
-                       "软件目录下的 data\\clipboard.json 和 data\\clipimg\\ 里（最多 200 条）。\n"
-                       "启动器里输 clip 就能翻历史。关掉只是停止收集，已有历史保留。");
-    clipLay->addRow(m_clip);
-    m_clipDays = new QSpinBox(clip);
-    m_clipDays->setObjectName("clipDays");
-    m_clipDays->setRange(0, 3650);
-    m_clipDays->setSuffix(QStringLiteral(" 天"));
-    m_clipDays->setSpecialValueText(QStringLiteral("不限"));
-    m_clipDays->setToolTip("两条上限取交集：超过这个天数的一律清掉，没超龄的仍然受「最多 200 条」兜底。\n"
-                           "选「不限」就只按条数算。改完当场裁一次，超龄条目那张图片文件也跟着删；\n"
-                           "裁掉的就是裁掉了，改回「不限」不会把它们找回来。");
-    clipLay->addRow(QStringLiteral("保留天数："), m_clipDays);
-    m_clipInfo = new QLabel(clip);
-    m_clipInfo->setObjectName("muted");
-    clipLay->addRow("当前：", m_clipInfo);
-    auto* clipClear = new QPushButton("清空剪贴板历史", clip);
-    clipClear->setToolTip("删除所有记录和已保存的图片文件");
-    clipLay->addRow(clipClear);
-
     // ---- 「外观」那一页：夜间 / 日间 从通用那张长列表里搬到这里（他 2026-10-20 点名）----
     // 搬完，通用那一行「外观：」的标签就没了 —— 判据盯着"外观那一行只有一颗、而且它在
     // 外观这一页上"，别哪天又被人加回通用。
@@ -1049,22 +1007,12 @@ ConfigPage::ConfigPage(QWidget* parent)
     lay->addWidget(ime);
     lay->addWidget(index);
     lay->addWidget(appDirs);
-    lay->addWidget(clip);
     lay->addWidget(data);
     outer->addLayout(btnLay, 0);
 
     connect(save, &QPushButton::clicked, this, &ConfigPage::onSave);
     connect(openBtn, &QPushButton::clicked, this, &ConfigPage::onOpenDataDir);
     connect(clearBtn, &QPushButton::clicked, this, &ConfigPage::onClearIndexCache);
-    connect(clipClear, &QPushButton::clicked, this, [this] {
-        ClipboardStore::instance().clear();
-        m_clipInfo->setText(QString("已清空 · 现在 %1 条").arg(ClipboardStore::instance().items().size()));
-    });
-    // 保留天数不等「保存」：它就是引擎的一条上限，改了当场生效才对得上那句话。
-    connect(m_clipDays, qOverload<int>(&QSpinBox::valueChanged), this, [this](int days) {
-        ClipboardStore::instance().setKeepDays(days);
-        m_clipInfo->setText(clipInfoText());
-    });
     load();
 }
 
@@ -1084,7 +1032,6 @@ void ConfigPage::load()
     updateHotkeyStatus();
     m_installPath->setText(cfg.value("install/path", Platform::defaultInstallRoot()).toString());
     m_proxy->setText(cfg.value("net/proxy").toString());
-    m_storeUrl->setText(cfg.value("store/indexUrl").toString());
     m_storeMirrors->setText(cfg.value("store/mirrors").toString());
     m_autoUpdate->setChecked(cfg.value("store/autoUpdate", false).toBool());
     const QString engine = cfg.value("web/engine", "baidu").toString();
@@ -1106,9 +1053,6 @@ void ConfigPage::load()
                            .arg(m_appRoots->count()).arg(dirItemCount(m_appRoots))
                            .arg(m_appDepth->value()));
     refreshPathInfo();
-    m_clip->setChecked(ClipboardStore::instance().enabled());
-    m_clipDays->setValue(ClipboardStore::instance().keepDays());
-    m_clipInfo->setText(clipInfoText());
     m_shellMenu->setChecked(ShellMenu::intent());
     m_archiveProgress->setChecked(cfg.value("ui/archiveProgress", false).toBool());
     // 三件事分开说：勾是你想要的，注册表里有没有是另一回事 —— 提供右键那几项的
@@ -1211,7 +1155,6 @@ void ConfigPage::onSave()
     cfg.setValue("general/hotkey", newHk);
     cfg.setValue("install/path", m_installPath->text().trimmed());
     cfg.setValue("net/proxy", m_proxy->text().trimmed());
-    cfg.setValue("store/indexUrl", m_storeUrl->text().trimmed());
     cfg.setValue("store/mirrors", m_storeMirrors->text().trimmed());
     cfg.setValue("store/autoUpdate", m_autoUpdate->isChecked());
     if (newHk != oldHk)
@@ -1302,8 +1245,6 @@ void ConfigPage::onSave()
         refreshPathInfo();
     }
 
-    ClipboardStore::instance().setEnabled(m_clip->isChecked());
-    m_clipInfo->setText(clipInfoText());
 
     // 只在真的变了时才写注册表，写完回读一遍把系统里的实际值显示出来
     if (m_imePunct->isEnabled() && imePunctState() != (m_imePunct->isChecked() ? 1 : 0)) {

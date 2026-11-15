@@ -11,7 +11,7 @@ inline constexpr int kShareBytes = 32;
 inline constexpr int kProofBytes = 32;
 inline constexpr int kTagBytes = 16;
 inline constexpr int kMaxPlaintext = 4 * 1024 * 1024 + 64;
-inline constexpr char kWireVersion[] = "HL01";
+inline constexpr char kWireVersion[] = "HL02";
 
 // 一次握手只创建一个对象；仅对端确认通过后开放加密记录接口。
 class SecureChannel {

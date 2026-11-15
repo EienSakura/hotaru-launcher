@@ -7,10 +7,16 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QImage>
+#include <QLineEdit>
+#include <QPushButton>
+#include <QStackedWidget>
+#include <QHBoxLayout>
+#include <QFrame>
 #include <QMimeData>
 #include <QNetworkProxy>
 #include <QPluginLoader>
 #include <QThread>
+#include <QTemporaryDir>
 #include <QWidget>
 #include <QtEndian>
 #include <cstdio>
@@ -26,8 +32,13 @@ struct NetworkSelftest {
         const QHostAddress loopback(QHostAddress::LocalHost);
         lower.m_ownId = QByteArray(kIdentityBytes, 'a');
         higher.m_ownId = QByteArray(kIdentityBytes, 'b');
-        lower.m_passcode = "sample-test-code";
-        higher.m_passcode = link == Link::WrongCode ? QByteArrayLiteral("another-test-code") : lower.m_passcode;
+        lower.setCredentialLookup([&](const QByteArray& id) {
+            return id == higher.m_ownId ? QByteArrayLiteral("sample-test-code") : QByteArray{};
+        });
+        higher.setCredentialLookup([&](const QByteArray& id) {
+            return id != lower.m_ownId ? QByteArray{} :
+                link == Link::WrongCode ? QByteArrayLiteral("another-test-code") : QByteArrayLiteral("sample-test-code");
+        });
         lower.openTopology({{0, loopback, 8}}, 0);
         higher.openTopology({{0, loopback, 8}}, 0);
         if (lower.m_endpoints.isEmpty() || higher.m_endpoints.isEmpty())
@@ -96,6 +107,141 @@ struct NetworkSelftest {
         }
         std::printf("FAIL expected private IPv4 not selected: %s\n", qPrintable(expected.toString()));
         return false;
+    }
+
+    enum class PairCase { Accept, Reject, Expire, WrongCode, SaveFails };
+
+    static bool invitation(PairCase action, const std::function<bool(const std::function<bool()>&)>& wait)
+    {
+        QTemporaryDir data;
+        const auto aPath = data.filePath(QStringLiteral("a")), bPath = data.filePath(QStringLiteral("b"));
+        Service a(aPath), b(bPath);
+        QString error;
+        if (!a.configure(QStringLiteral("设备 A"), error) || !b.configure(QStringLiteral("设备 B"), error))
+            return false;
+        const auto aId = a.m_identity, bId = b.m_identity;
+        auto& lower = a.m_network;
+        auto& higher = b.m_network;
+        const QHostAddress loopback(QHostAddress::LocalHost);
+        lower.m_ownId = aId;
+        higher.m_ownId = bId;
+        lower.openTopology({{0, loopback, 8}}, 0);
+        higher.openTopology({{0, loopback, 8}}, 0);
+        if (lower.m_endpoints.isEmpty() || higher.m_endpoints.isEmpty() ||
+            !a.beginInvitation(error) || a.invitationCode().size() != 5)
+            return false;
+        if (!lower.advertisement(45456).endsWith(QStringLiteral("设备 A").toUtf8()))
+            return false;
+        // 固定测试值验证前导零，跳过真实等待并保留实际 TCP/SPAKE2 交换。
+        lower.m_inviteCode = "00042";
+        if (action == PairCase::Expire)
+            lower.endInvitation();
+        auto candidate = Network::Discovery{aId, loopback, lower.m_endpoints.front().listener->serverPort(), 0, 1};
+        higher.m_discoveries.insert(aId, candidate);
+        const auto join = [&](QString code) { return b.joinInvitation(loopback.toString(), code, error); };
+        if (action == PairCase::WrongCode) {
+            for (int i = 0; i < 5; ++i) {
+                lower.m_incomingAttempts.clear();
+                higher.m_outgoingAttempts.clear();
+                if (!join(QStringLiteral("00043")) || !wait([&] {
+                        return lower.m_peers.isEmpty() && higher.m_peers.isEmpty() && lower.m_inviteAttempts == i + 1;
+                    }))
+                    return false;
+            }
+            return !lower.invitationActive() && a.pairedDevices().isEmpty() && b.pairedDevices().isEmpty();
+        }
+        if (!join(QStringLiteral("00042")))
+            return false;
+        if (action == PairCase::Expire)
+            return wait([&] { return lower.m_peers.isEmpty() && higher.m_peers.isEmpty(); }) &&
+                   a.pairedDevices().isEmpty() && b.pairedDevices().isEmpty();
+        if (!wait([&] { return a.pairingRequest() == QStringLiteral("设备 B"); }) ||
+            !a.devices().isEmpty() || !b.devices().isEmpty())
+            return false;
+        if (action == PairCase::SaveFails)
+            b.m_settingsReadable = false;
+        if (!a.decidePairing(action != PairCase::Reject, error))
+            return false;
+        if (!wait([&] { return lower.m_peers.isEmpty() && higher.m_peers.isEmpty(); }))
+            return false;
+        if (action != PairCase::Accept)
+            return a.pairedDevices().isEmpty() && b.pairedDevices().isEmpty() &&
+                   a.devices().isEmpty() && b.devices().isEmpty();
+        if (lower.invitationActive() || lower.advertisement(45456).contains(QStringLiteral("设备 A").toUtf8()) ||
+            !a.pairedDevices().isEmpty() || !b.pairedDevices().isEmpty() ||
+            a.m_knownPeers.value(bId).key.size() != 32)
+            return false;
+        lower.m_incomingAttempts.clear();
+        higher.m_outgoingAttempts.clear();
+        if (!join(QStringLiteral("00042")) || !wait([&] {
+                return lower.m_peers.isEmpty() && higher.m_peers.isEmpty();
+            }) || !a.pairingRequest().isEmpty())
+            return false;
+        Service restoredA(aPath), restoredB(bPath);
+        const auto stored = restoredA.m_knownPeers.value(bId).key;
+        if (restoredA.m_identity != aId || restoredB.m_identity != bId ||
+            stored.size() != 32 || stored != restoredB.m_knownPeers.value(aId).key)
+            return false;
+        QFile raw(QDir(aPath).filePath(QStringLiteral("lan-connection/settings.json")));
+        if (!raw.open(QIODevice::ReadOnly) || raw.readAll().contains(stored.toBase64()))
+            return false;
+        raw.close();
+        // 用重启后从磁盘恢复的凭据，建立与邀请完全独立的常规会话。
+        auto& na = restoredA.m_network;
+        auto& nb = restoredB.m_network;
+        na.m_ownId = aId;
+        nb.m_ownId = bId;
+        na.openTopology({{0, loopback, 8}}, 0);
+        nb.openTopology({{0, loopback, 8}}, 0);
+        if (na.m_endpoints.isEmpty() || nb.m_endpoints.isEmpty())
+            return false;
+        candidate.port = na.m_endpoints.front().listener->serverPort();
+        if (!nb.connectCandidate(candidate) || !wait([&] {
+                return restoredA.devices().size() == 1 && restoredB.devices().size() == 1;
+            }))
+            return false;
+        // 双端都没有启用共享时，仍应应答已认证连接上的心跳。
+        bool pong = false;
+        auto* peer = *restoredB.m_sessions.keyBegin();
+        QObject context;
+        QObject::connect(peer, &Peer::message, &context, [&](const QByteArray& packet) {
+            pong |= packet == QByteArray(1, Pong);
+        });
+        if (!peer->send(QByteArray(1, Ping)) || !wait([&] { return pong; }) ||
+            restoredA.devices().size() != 1 || restoredB.devices().size() != 1)
+            return false;
+        // 已认证的接收应先把解码内容交给宿主，再写入系统剪贴板。
+        restoredA.m_coreEnabled = true;
+        restoredB.m_coreEnabled = true;
+        restoredA.m_available = restoredA.m_features = Clipboard;
+        restoredB.m_available = restoredB.m_features = Clipboard;
+        restoredA.broadcastFeatures();
+        restoredB.broadcastFeatures();
+        if (!wait([&] {
+                const auto aDevices = restoredA.devices(), bDevices = restoredB.devices();
+                return aDevices.size() == 1 && bDevices.size() == 1 &&
+                       aDevices.front().features == Clipboard && bDevices.front().features == Clipboard;
+            }))
+            return false;
+        QString received;
+        QObject::connect(&restoredA, &Service::clipboardReceived, &context, [&](const QMimeData& mime) {
+            if (mime.hasFormat(QLatin1String(kHotaruClipboardReceived)))
+                received = mime.text();
+        });
+        const auto payload = QStringLiteral("局域网接收测试");
+        if (!peer->send(QByteArray(1, Text) + payload.toUtf8()) ||
+            !wait([&] { return received == payload && QApplication::clipboard()->text() == payload; }))
+            return false;
+        const QByteArray third(kIdentityBytes, 'z');
+        restoredA.m_knownPeers.insert(third, {QStringLiteral("其他设备"), loopback, QByteArray(32, 'z'), false});
+        if (!restoredA.forgetDevice(bId, error) ||
+            !wait([&] { return restoredB.devices().isEmpty(); }))
+            return false;
+        nb.m_outgoingAttempts.clear();
+        na.m_incomingAttempts.clear();
+        return !restoredA.m_knownPeers.contains(bId) && restoredA.m_knownPeers.contains(third) &&
+            nb.connectCandidate(candidate) && wait([&] { return nb.m_peers.isEmpty(); }) &&
+            restoredA.devices().isEmpty() && restoredB.devices().isEmpty();
     }
 
     static bool probeReportsWhyItDidNotStart()
@@ -271,6 +417,10 @@ void files()
                QDir(target).entryList(QDir::AllEntries | QDir::NoDotAndDotDot).isEmpty(),
                "no writes before receiver approval"))
         return;
+    QString receiveError;
+    check(!receiver.accept(source + QStringLiteral("/中文文件.txt"), &receiveError) &&
+          !receiveError.isEmpty() && receiver.awaitingDecision() && sender.outgoing(),
+          "invalid receive directory preserves the pending offer");
     receiver.decline();
     check(waitFor([&] { return !sender.outgoing(); }) && stageGone(target), "decline and retry available");
 
@@ -338,6 +488,10 @@ void clipboardAndSettings()
     text.setData(QString::fromLatin1(kHotaruClipboardPrivate), "1");
     check(encodeClipboard(text).isEmpty() && !decodeClipboard(Text, QByteArray("\xff", 1)),
           "private clipboard and invalid text excluded");
+    QMimeData history;
+    history.setText(QStringLiteral("恢复的历史"));
+    history.setData(QLatin1String(kHotaruClipboardRestored), "1");
+    check(encodeClipboard(history).isEmpty(), "restored clipboard history is not sent");
     QMimeData image;
     QImage sample(10, 12, QImage::Format_RGB32);
     sample.fill(Qt::darkGreen);
@@ -353,32 +507,48 @@ void clipboardAndSettings()
     QString error;
     {
         Service service(temp.path());
+        check(service.clipboardSearchAlias() == QStringLiteral("clip"), "fresh clipboard alias is clip");
         check(!service.enabled(Clipboard) && !service.enabled(Files) &&
-              !service.setEnabled(Clipboard, true, error), "both features off, passcode required");
-        check(!service.configure(QStringLiteral("测试设备"), QStringLiteral("short"), error) &&
-              service.configure(QStringLiteral("测试设备"), QString::fromLatin1(kCode), error),
-              "passcode validation and DPAPI protection");
+              !service.setEnabled(Clipboard, true, error), "both features off, core required");
+        check(!service.configure({}, error) && service.configure(QStringLiteral("测试设备"), error) &&
+              service.setClipboardSearchAlias({}, error), "device name and empty alias saved");
     }
     Service restored(temp.path());
-    const auto raw = readFile(temp.filePath(QStringLiteral("lan-preview/settings.json")));
-    check(!raw.isEmpty() && !raw.contains(kCode) && restored.hasCode() &&
-          restored.name() == QStringLiteral("测试设备"), "DPAPI round trip without plaintext storage");
-    const auto diagnostic = readFile(temp.filePath(QStringLiteral("lan-preview/lan-diagnostics.log")));
+    check(restored.clipboardSearchAlias().isEmpty() &&
+          restored.name() == QStringLiteral("测试设备"), "empty shortcut stays disabled after reload");
+    const auto legacy = temp.filePath(QStringLiteral("legacy"));
+    check(QDir().mkpath(legacy + QStringLiteral("/lan-preview")) &&
+          writeFile(legacy + QStringLiteral("/lan-preview/settings.json"),
+              R"({"version":1,"name":"Old label","clipboardAlias":"clip-old","features":3,"dpapi":"unused"})"),
+          "isolated legacy settings fixture");
+    Service migrated(legacy);
+    check(migrated.name() == QStringLiteral("Old label") &&
+          migrated.clipboardSearchAlias() == QStringLiteral("clip-old") &&
+          !migrated.coreEnabled() && !migrated.requested(Clipboard) && !migrated.requested(Files) &&
+          migrated.pairedDevices().isEmpty(), "migration preserves labels but discards old trust and switches");
+    const auto oldDefault = temp.filePath(QStringLiteral("old-default"));
+    check(QDir().mkpath(oldDefault + QStringLiteral("/lan-preview")) &&
+          writeFile(oldDefault + QStringLiteral("/lan-preview/settings.json"),
+          R"({"version":1,"name":"Old label","clipboardAlias":"jtb"})") &&
+          Service(oldDefault).clipboardSearchAlias() == QStringLiteral("clip"),
+          "previous default clipboard alias migrates to clip");
+    const auto diagnostic = readFile(QDir(restored.diagnosticDirectory()).filePath(QStringLiteral("lan-diagnostics.log")));
     check(!diagnostic.isEmpty() && !diagnostic.contains(kCode) &&
           !diagnostic.contains(QStringLiteral("测试设备").toUtf8()), "diagnostic log excludes passcode and device name");
-    restored.copyCode();
-    const auto* mime = QApplication::clipboard()->mimeData();
-    check(mime && mime->text() == QString::fromLatin1(kCode) && encodeClipboard(*mime).isEmpty(),
-          "copied passcode excluded from synchronization");
-
     QString lifecycleError;
     Service lifecycle(temp.filePath(QStringLiteral("lifecycle")));
-    check(lifecycle.configure(QStringLiteral("生命周期测试"), QString::fromLatin1(kCode), lifecycleError) &&
-          lifecycle.setEnabled(Clipboard, true, lifecycleError),
-          "enabling LAN plugin starts discovery safely");
+    lifecycle.setAvailableFeatures(Clipboard);
+    check(lifecycle.setCoreEnabled(true, lifecycleError) && lifecycle.setEnabled(Clipboard, true, lifecycleError) &&
+          !lifecycle.setEnabled(Files, true, lifecycleError), "only installed features may be enabled");
+    auto* privateMime = new QMimeData;
+    privateMime->setText(QStringLiteral("私密测试"));
+    privateMime->setData(QString::fromLatin1(kHotaruClipboardPrivate), "1");
+    QApplication::clipboard()->setMimeData(privateMime);
+    check(lifecycle.clipboardSnapshot().kind == HotaruClipboardSnapshot::Empty,
+          "private content omitted from shortcut snapshot");
     QCoreApplication::processEvents(QEventLoop::AllEvents, 50);
-    check(lifecycle.setEnabled(Clipboard, false, lifecycleError),
-          "disabling LAN plugin stops discovery safely");
+    check(lifecycle.setCoreEnabled(false, lifecycleError) && !lifecycle.enabled(Clipboard) &&
+          lifecycle.requested(Clipboard), "stopping core preserves the requested feature state");
 }
 
 void module(const QString& path)
@@ -389,12 +559,55 @@ void module(const QString& path)
     if (!check(plugin && plugin->start(data.path()), "Qt module ABI and startup"))
         return;
     const QString filesId = QStringLiteral("lan-files"), clipId = QStringLiteral("lan-clipboard");
+    auto* package = qobject_cast<HotaruLanPackage*>(loader.instance());
+    check(package && package->id() == QLatin1String(kHotaruLanCoreId), "core package IID");
+    check(qobject_cast<HotaruLanClipboardReceive*>(loader.instance()) != nullptr, "optional clipboard receive bridge ABI");
+    const std::unique_ptr<QWidget> corePage(plugin->createPage(QLatin1String(kHotaruLanCoreId), nullptr));
+    QPushButton* diagnostics = nullptr;
+    if (corePage)
+        for (auto* button : corePage->findChildren<QPushButton*>())
+            if (button->text().startsWith(QStringLiteral("连接诊断"))) diagnostics = button;
+    check(diagnostics && diagnostics->isCheckable() && !diagnostics->isChecked(), "diagnostics uses themed collapsible button");
+    if (diagnostics) {
+        diagnostics->click();
+        check(diagnostics->isChecked() && diagnostics->text().endsWith(QStringLiteral("▾")), "diagnostics keyboard-capable toggle reflects expansion");
+    }
+    auto* stack = qobject_cast<QStackedWidget*>(corePage.get());
+    QPushButton* discover = nullptr;
+    QPushButton* back = nullptr;
+    if (stack) {
+        for (auto* button : stack->findChildren<QPushButton*>()) {
+            if (button->text().startsWith(QStringLiteral("发现邀请"))) discover = button;
+            if (button->text() == QStringLiteral("返回局域网连接")) back = button;
+        }
+    }
+    if (discover && back) {
+        discover->setEnabled(true);
+        discover->click();
+        const bool opened = stack->currentIndex() == 1;
+        back->click();
+        check(opened && stack->currentIndex() == 0, "invite discovery is a separate page with back navigation");
+    } else {
+        check(false, "invite discovery is a separate page with back navigation");
+    }
     const std::unique_ptr<QWidget> filesPage(plugin->createPage(filesId, nullptr));
     const std::unique_ptr<QWidget> clipPage(plugin->createPage(clipId, nullptr));
     check(filesPage && clipPage && !filesPage->findChildren<QCheckBox*>().isEmpty() &&
           !clipPage->findChildren<QCheckBox*>().isEmpty() &&
           plugin->state(filesId).contains(QStringLiteral("已关闭")) &&
           plugin->state(clipId).contains(QStringLiteral("已关闭")), "both settings pages and default state");
+    bool parallel = false;
+    if (filesPage)
+        for (auto* row : filesPage->findChildren<QHBoxLayout*>()) {
+            const auto* left = row->count() == 2 ? row->itemAt(0)->widget() : nullptr;
+            const auto* right = row->count() == 2 ? row->itemAt(1)->widget() : nullptr;
+            if (left && right && left->property("lanTransferSide").toString() == QStringLiteral("send") &&
+                right->property("lanTransferSide").toString() == QStringLiteral("receive"))
+                parallel = true;
+        }
+    check(parallel, "file settings keep send and receive in adjacent columns");
+    check(filesPage && clipPage && filesPage->findChildren<QLineEdit*>().isEmpty() &&
+          clipPage->findChildren<QLineEdit*>().size() == 1, "file settings have no clipboard shortcut input");
 }
 }
 
@@ -426,6 +639,15 @@ int main(int argc, char** argv)
     check(testLink(Link::OneSided), "higher ID alone sees the candidate and authenticates on retry");
     check(testLink(Link::Crossed), "crossed attempts keep one bidirectional authenticated session");
     check(testLink(Link::WrongCode), "automatic pairing rejects a different passcode");
+    using PairCase = NetworkSelftest::PairCase;
+    const auto testPair = [](PairCase action) {
+        return NetworkSelftest::invitation(action, [](const std::function<bool()>& ready) { return waitFor(ready); });
+    };
+    check(testPair(PairCase::Accept), "invite name, DPAPI reconnect, zero-feature heartbeat, clipboard delivery and selective revoke");
+    check(testPair(PairCase::Reject), "declining does not grant access");
+    check(testPair(PairCase::Expire), "expired code cannot authenticate");
+    check(testPair(PairCase::WrongCode), "five wrong guesses consume the invitation");
+    check(testPair(PairCase::SaveFails), "incomplete persistence does not expose a paired device");
     clipboardAndSettings();
     files();
     if (app.arguments().size() > 1)

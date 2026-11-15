@@ -8,6 +8,7 @@ class QStackedWidget;
 class QToolButton;
 class QTimer;
 class ToolsPage;
+namespace HotaruPluginRepository { class Client; }
 
 // ltool 配置页面（搜索框右侧齿轮打开）：左侧菜单 + 右侧内容
 //   快捷搜索 / 插件商店 / 配置 / 关于 —— 只有四行。
@@ -25,6 +26,7 @@ public:
     // 它藏在「插件商店」那张卡里面，所以先展开卡再挑 tab；toolId 非空就展开那张卡）
     void openAt(int menuRow, int tab = -1, const QString& toolId = QString());
     void editQuickSearch(const QString& name);
+    bool openNativePlugin(const QString& id, const QByteArray& target = {});
 
 signals:
     // 索引相关设置变化，需要触发一次重新扫描
@@ -36,6 +38,8 @@ signals:
 private:
     void ensurePage(int index);
     QWidget* buildPluginHome();
+    QWidget* buildPluginPage(QWidget* parent, HotaruPluginRepository::Client* client = nullptr);
+    void openPluginRepository();
     ToolsPage* openCompatibilityPlugins();
     void buildBusyRow();
     void refreshBusy();     // 菜单左下角的加载标志：有后台静默安装在跑才出现

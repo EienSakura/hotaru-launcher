@@ -115,27 +115,37 @@ void Transfers::sendOffer(Peer* peer, const QStringList& paths)
     emit changed();
 }
 
-void Transfers::accept(const QString& destination)
+bool Transfers::accept(const QString& destination, QString* error)
 {
-    if (!awaitingDecision() || destination.isEmpty())
-        return;
+    if (!awaitingDecision() || destination.isEmpty()) {
+        if (error)
+            *error = QStringLiteral("没有待接收的文件或未选择目录");
+        return false;
+    }
     const auto job = m_in;
     const QStorageInfo disk(destination);
     job->stage = std::make_unique<Staging>(destination);
     if (!disk.isReady() || disk.bytesAvailable() < job->catalog.bytes ||
         !job->stage->prepare(job->catalog)) {
-        finish(true, true, QStringLiteral("无法接收：目标不可写、空间不足或包含链接"));
-        return;
+        job->stage.reset();
+        m_inStatus = QStringLiteral("无法接收：目录不可写、空间不足或包含链接，请另选目录");
+        if (error)
+            *error = m_inStatus;
+        emit changed();
+        return false;
     }
     job->skipDirs();
     job->state = Active;
     job->deadline = QDeadlineTimer(kIdleMs);
     if (!send(job, Accept)) {
         finish(true, false, QStringLiteral("无法确认，连接已断开"));
-        return;
+        if (error)
+            *error = QStringLiteral("无法确认，连接已断开");
+        return false;
     }
     m_inStatus = QStringLiteral("接收中：%1").arg(progress(0, job->catalog.bytes));
     emit changed();
+    return true;
 }
 
 void Transfers::decline()

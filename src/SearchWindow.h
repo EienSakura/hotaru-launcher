@@ -9,8 +9,6 @@
 #include <QSet>
 
 #include "AppScanner.h"
-#include "DevEnv.h"
-#include "RegClean.h"
 #include "PinnedApps.h"
 
 class QLineEdit;
@@ -33,13 +31,10 @@ struct SearchResult {
         File,         // 文件/文件夹：Enter 打开
         Web,          // 网址/网站关键字：Enter 用默认浏览器打开
         QuickSearch,  // 快捷搜索规则：网页、应用或磁盘文件夹
-        Command,      // 命令：rescan / init / path / reg
+        Command,      // 命令：宿主命令或插件直达
         PinnedApp,    // 固定软件或磁盘文件夹：target=配置中的 id
         PinnedGroup,  // 固定面板内部的图标分组：target=groups 中的 id
-        PluginEntry,  // 开发环境插件入口
-        PluginItem,   // 插件组件（安装/重检）
         NativePeer,   // 已认证的直属插件设备，Enter 后选择文件发送
-        RegIssue,     // 注册表问题（Enter 删除）
         Info,         // 纯信息行，不可激活
     };
     Kind kind = Info;
@@ -84,11 +79,13 @@ public:
     void setHotkeyLabel(const QString& label);
     void setStatus(const QString& detail);
     void openSettings();
+    void requestQuit();
     // 弹设置页 → 工具页 → 展开那个插件的页（工具都是 DLL 插件，主程序不再 new 它们）。
     // text 非空 = 把这段递给那个工具（JSON 解析 / Base64 解码那两条）。
     void openTool(const QString& id, const QString& text = QString());
     // 托盘「关于」：弹设置页并翻到那一行（行号就是左侧菜单的顺序）
     void openSettingsPage(int menuRow);
+    void openNativePlugin(const QString& id, const QByteArray& target = {});
 
     const SearchResult& resultAt(int i) const { return m_results[i]; }
     int resultCount() const { return m_results.size(); }   // 给离屏自测用（--pinyin 数第一行是谁）
@@ -144,10 +141,12 @@ private:
     void startScan(bool quiet, bool forceDeep, bool sequential = false);
     void watchAppDirs();        // 监听开始菜单/桌面：装了新软件马上进索引
     QString currentCommandTarget() const;   // 当前行若是命令条目，返回它的 target
+    void showClipboardResults();
+    void leaveClipboardHistory();
+    bool restoreClipboardResult(const QString& target);
+    QString m_clipHistoryAlias;
+    int m_clipHistoryLimit = 30;
     bool pasteClipToPrevious();             // Ctrl+Enter：放回剪贴板并粘给呼出前的窗口
-    void handleInit(const QString& arg);
-    void handlePath(const QString& rest);
-    void handleReg(const QString& rest);
 
     void loadUsage();
     void saveUsage();
@@ -157,6 +156,7 @@ private:
 
     QLineEdit* m_input = nullptr;
     QWidget* m_inputRow = nullptr;
+    QToolButton* m_clipHistoryBack = nullptr;
     LauncherSkin* m_skin = nullptr;
     LauncherGrid* m_grid = nullptr;
     QWidget* m_groupPanel = nullptr;
@@ -187,12 +187,8 @@ private:
     quint64 m_pendingFileSeq = 0;
 
     QVector<SearchResult> m_results;
-    QVector<RegIssue> m_regIssues;
     QVector<AppEntry> m_apps;
-    QHash<QString, DevItem> m_detectItems; // "id|label" -> 检测结果
-    QSet<QString> m_detecting;
     QHash<QString, int> m_usage;           // lnk 路径 -> 使用次数
-    int m_detectRun = 0;
     QAtomicInt m_scanning{0};
     QElapsedTimer m_showTime; // 用于忽略弹出瞬间的失焦，避免闪烁隐藏
     QElapsedTimer m_showLatency;   // 从按下呼出到画出来的分段计时（诊断"唤出慢"）
@@ -202,5 +198,8 @@ private:
     bool m_hadForeground = false;
     bool m_settingsOpen = false;
     bool m_restoringPage = false;
+    QPointer<QWidget> m_quitPrompt;
+    bool m_quitPending = false;
+    bool m_quitting = false;
     QPointer<QWidget> m_settingsDlg;   // 设置页开着时热键不再弹搜索框
 };

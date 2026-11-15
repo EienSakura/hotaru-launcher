@@ -183,6 +183,7 @@ qt_add_library(ltoolcore SHARED
     src/PluginHost.cpp
     src/PluginStore.cpp
     src/HotaruNativeHost.cpp
+    src/HotaruPluginRepository.cpp
     src/Firewall.cpp
     src/InfoRow.cpp
     src/ShellMenu.cpp
@@ -304,6 +305,34 @@ function(ltool_target_setup tgt)
 endfunction()
 
 ltool_target_setup(ltoolcore)
+find_package(OpenSSL REQUIRED COMPONENTS Crypto)
+target_link_libraries(ltoolcore PRIVATE OpenSSL::Crypto)
+# 官方构建默认信任 Hotaru-Plugins 当前发布公钥；派生构建可覆盖。
+set(HOTARU_PLUGIN_PUBLIC_KEYS "10c5c77ea4aae86fcba5a68e3d188cdf64b93f85c4ca5f83235f1771989a75b2"
+    CACHE STRING "官方 Ed25519 公钥，逗号分隔的 32 字节十六进制")
+if(NOT HOTARU_PLUGIN_PUBLIC_KEYS STREQUAL "")
+    string(REPLACE "," ";" _hotaru_plugin_keys "${HOTARU_PLUGIN_PUBLIC_KEYS}")
+    foreach(_key IN LISTS _hotaru_plugin_keys)
+        string(LENGTH "${_key}" _key_length)
+        if(NOT _key_length EQUAL 64 OR NOT _key MATCHES "^[0-9a-fA-F]+$")
+            message(FATAL_ERROR "HOTARU_PLUGIN_PUBLIC_KEYS 必须是逗号分隔的 32 字节 hex 公钥")
+        endif()
+    endforeach()
+endif()
+set(HOTARU_PLUGIN_ABI "windows-x64-msvc${MSVC_TOOLSET_VERSION}-qt${Qt6Core_VERSION}-release-v1")
+target_compile_definitions(ltoolcore PRIVATE
+    HOTARU_PLUGIN_PUBLIC_KEYS="${HOTARU_PLUGIN_PUBLIC_KEYS}"
+    HOTARU_PLUGIN_ABI="${HOTARU_PLUGIN_ABI}")
+file(GENERATE OUTPUT "${CMAKE_BINARY_DIR}/hotaru-plugin-abi.txt" CONTENT "${HOTARU_PLUGIN_ABI}\n")
+
+configure_file(tests/plugin-repository/fixture.json.in repository-fixture.json @ONLY)
+add_library(hotaru-repository-fixture MODULE EXCLUDE_FROM_ALL tests/plugin-repository/Fixture.cpp)
+target_include_directories(hotaru-repository-fixture PRIVATE src "${CMAKE_CURRENT_BINARY_DIR}")
+target_link_libraries(hotaru-repository-fixture PRIVATE Qt6::Widgets)
+target_compile_options(hotaru-repository-fixture PRIVATE "$<$<CXX_COMPILER_ID:MSVC>:/utf-8>")
+set_target_properties(hotaru-repository-fixture PROPERTIES
+    LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/$<CONFIG>/repository-test-fixtures"
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/$<CONFIG>/repository-test-fixtures")
 
 if(MSVC)
     set(_winrt_found FALSE)
@@ -424,9 +453,6 @@ ltool_add_tool(grid GridPlugin           plugins/grid/GridBoard.cpp plugins/grid
                                          plugins/grid/gridplugin.cpp plugins/grid/gridselftest.cpp)
 ltool_add_tool(language LanguagePlugin   plugins/language/LanguagePage.cpp
                                          plugins/language/languageplugin.cpp)
-ltool_add_tool(clipboard ClipboardPlugin plugins/clipboard/ClipboardPage.cpp
-                                         plugins/clipboard/clipboardplugin.cpp
-                                         plugins/clipboard/clipselftest.cpp)
 # 随机数生成：区间取数 / 不重复抽取 / 随机字符串 / UUID。
 # 生成那一层是 Rand::generate() 一颗纯函数，页面和 randselftest 读同一份（判据不许另抄一遍算法）。
 ltool_add_tool(random RandomPlugin       plugins/random/RandomTool.cpp
@@ -445,7 +471,7 @@ ltool_add_tool(linuxdo LinuxdoPlugin     plugins/linuxdo/LinuxdoWatch.cpp
 add_dependencies(ltool ltool-repair ltool-ads ltool-disk ltool-network ltool-registry
                         ltool-startup ltool-user ltool-json ltool-base64 ltool-shell ltool-record
                         ltool-capture ltool-software ltool-downloads ltool-tasks ltool-grid
-                        ltool-language ltool-linuxdo ltool-clipboard ltool-random)
+                        ltool-language ltool-linuxdo ltool-random)
 
 endif() # HOTARU_BUNDLE_PLUGINS
 
@@ -504,6 +530,9 @@ add_custom_command(TARGET ltool POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
             "${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/share/bit7z/copyright"
             "$<TARGET_FILE_DIR:ltool>/licenses/bit7z-MPL-2.0.txt"
-    COMMENT "copy 7zip / bit7z 许可证原文"
+    COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+            "${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/share/openssl/copyright"
+            "$<TARGET_FILE_DIR:ltool>/licenses/OpenSSL.txt"
+    COMMENT "copy 7zip / bit7z / OpenSSL 许可证原文"
     VERBATIM
 )

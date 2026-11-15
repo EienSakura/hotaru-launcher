@@ -104,14 +104,26 @@ cmake -S . -B build/lan-preview -G "Visual Studio 17 2022" -A x64 `
   -DHOTARU_BORINGSSL_CRYPTO="$pwd/build/hotaru-local/lan-deps/boringssl/lib/crypto.lib"
 cmake --build build/lan-preview --config Release --target hotaru-lan-selftest ltool
 ./tools/package-dev.ps1 -BuildDirectory build/lan-preview `
-  -OutputFile build/Hotaru-lan-preview-x64.zip -IncludeLanPreview
+  -OutputFile build/Hotaru-lan-preview-x64.zip
+$pluginBuild = 'build/lan-preview/Release/native-package-build'
+$pluginVersion = '1.0.0'
+./tools/package-plugin.ps1 -PluginId lan-core -Version $pluginVersion -OutputDirectory build `
+  -Dll "$pluginBuild/HotaruLan.dll" -License "$pluginBuild/BoringSSL-LICENSE.txt"
+./tools/package-plugin.ps1 -PluginId lan-clipboard -Version $pluginVersion -OutputDirectory build `
+  -Dll "$pluginBuild/lan-clipboard.dll"
+./tools/package-plugin.ps1 -PluginId lan-files -Version $pluginVersion -OutputDirectory build `
+  -Dll "$pluginBuild/lan-files.dll"
 ```
+
+启用 `HOTARU_LAN_PREVIEW` 的开发宿主 ZIP 和同名运行目录预装三个白名单 DLL（`native-plugins-dev/`）及 BoringSSL 许可证，缺件即拒绝打包；开关默认关闭。三个独立 ZIP 仍用于验证按依赖导入，正式版不捆绑。
 
 局域网自测使用 `QT_QPA_PLATFORM=offscreen`；双机操作按[局域网预览清单](lan-preview-testing.md)进行。
 
 `HotaruDev.exe` 使用独立的单实例通道、`data-dev`、`ltool-plugins-dev`、`HotaruDev` 登录项与默认 **Ctrl+Alt+H**，不迁移旧数据，不写资源管理器菜单。开发版测试数据覆盖变量为 `HOTARU_DEV_DATA_DIR`。正式版默认 `HOTARU_DEV_BUILD=OFF`，原来的构建和安装器用法不变。参见[实机测试清单](development-testing.md)。
 
 ## 工具插件
+
+Hotaru 新产出的插件分发包文件名统一使用小写 `hotaru-plugin-` 前缀，例如 `hotaru-plugin-lan-core-1.0.0-x64.zip`。打包时检查此前缀，导入时按包内 DLL 元数据判断 ID、接口版本和依赖。此规则不改动 DLL 名、包内 ID、历史发布附件、SDK、主题或宿主包。
 
 默认 `HOTARU_BUNDLE_PLUGINS=OFF`。需要同时编译仓库保留的工具时，在CMake配置中改为 `ON`，再构建 `ltool`。该操作会编译并部署工具DLL，通常开发启动器无需开启。
 
@@ -198,3 +210,7 @@ git diff --check
 `main` 和 `hotaru/dev` 从 Hotaru 1.0.0 的独立首提交开始，不继承上游提交历史。许可证、版权及 README 来源说明继续保留。`upstream` 仍指向原项目；维护者在本地保存完整历史与同步记录，先在本地同步分支验证上游更新，再将审核后的代码差异应用到 `hotaru/dev`，不能把带上游父历史的合并提交推回产品分支。
 
 CI 从 `tools/upstream-base.txt` 下载固定上游提交，仅用于插件版本及接口布局比较；该下载不会成为产品分支的父历史。首版发布说明只记录 Hotaru 的独立首提交，后续以产品版本标签比较。
+
+## 官方插件仓库
+
+仓库目录、发布、验签和本地导入说明见 [Hotaru 插件仓库](plugin-repository.md)。

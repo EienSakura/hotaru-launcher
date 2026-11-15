@@ -1,6 +1,12 @@
 {
   "Api": 1,
-  "Ids": ["lan-clipboard", "lan-files"],
+  "Name": "局域网连接",
+  "Desc": "配对并管理局域网设备。",
+  "Category": "service",
+  "Version": "1.0.0",
+  "Abi": "@HOTARU_PLUGIN_ABI@",
+  "Id": "lan-core",
+  "Requires": "",
   "Channel": "development-preview",
-  "Protocol": "HL01"
+  "Protocol": "HL02"
 }

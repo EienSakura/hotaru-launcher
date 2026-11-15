@@ -16,8 +16,8 @@
 #include "AdBlocker.h"
 #include "CaptureHistory.h"
 #include "ConfigPage.h"
-#include "ClipboardStore.h"
 #include "HotaruNativeHost.h"
+#include "HotaruPluginRepository.h"
 #include "DevEnv.h"
 #include "ToolsPage.h"
 #include "PluginHost.h"
@@ -234,7 +234,7 @@ bool oneShotCommand(const QString& flag)
     static const QSet<QString> commands = {
         "--hotarutest", "--hotarupreview", "--theme-import", "--theme-select", "--smoke",
         "--mfttest", "--mftree", "--searchtime", "--searchdump", "--disktime", "--rowmenu",
-        "--username", "--gridtest", "--cliptest", "--randtest", "--linuxdotest", "--linuxdonet",
+        "--username", "--gridtest", "--randtest", "--linuxdotest", "--linuxdonet",
         "--startuptest", "--plugintest", "--about", "--updatecheck", "--diskbranch", "--diskui",
         "--diskscale", "--regscan", "--startupscan", "--fw", "--uptime", "--adscan", "--fwtry",
         "--fwallow", "--fwremove", "--whohastest", "--archivetest", "--snaprect", "--appdirs",
@@ -748,6 +748,27 @@ int main(int argc, char* argv[])
         qputenv(BuildChannel::dataOverride, fixture.path().toUtf8());
         return runHotaruSearchSelftest();
     }
+    if (command == "--hotarupluginrepositorytest") {
+        QApplication cli(argc, argv);
+        if (QGuiApplication::platformName() != QStringLiteral("offscreen")) return 2;
+        QString error;
+        const bool ok = HotaruPluginRepository::selftest(cli.arguments().mid(2), error);
+        std::printf("%s %s\n", ok ? "PASS" : "FAIL", qPrintable(ok ?
+            QStringLiteral("插件仓库：签名、渠道、依赖、本地安装、事务回退") : error));
+        return ok ? 0 : 1;
+    }
+    if (command == "--hotarulanpackagetest") {
+        QApplication cli(argc, argv);
+        QTemporaryDir fixture;
+        if (!fixture.isValid() || QGuiApplication::platformName() != QStringLiteral("offscreen"))
+            return 2;
+        qputenv(BuildChannel::dataOverride, fixture.path().toUtf8());
+        QString error;
+        const bool ok = HotaruNativeHost::previewPackageSelftest(cli.arguments().mid(2), error);
+        const auto message = (ok ? QStringLiteral("局域网 ZIP 安装顺序、加载、搜索启停和重复安装") : error).toUtf8();
+        std::printf("%s %s\n", ok ? "PASS" : "FAIL", message.constData());
+        return ok ? 0 : 1;
+    }
     if (command == "--hotarustarttest" || command == "--hotaru-instance-probe") {
         QCoreApplication cli(argc, argv);
         if (command == "--hotarustarttest")
@@ -795,7 +816,7 @@ int main(int argc, char* argv[])
                                                          //    deliver 的 installed 那一栏跑的就是这一面旗，
                                                          //    没沙箱 ⇒ 它往**还没搬**的数据目录播了默认 webs.json
             || a == QLatin1String("--linuxdotest")
-            || a == QLatin1String("--linuxdonet") || a == QLatin1String("--cliptest")
+            || a == QLatin1String("--linuxdonet")
             || a == QLatin1String("--hotarutest") || a == QLatin1String("--hotarupreview")
             || a == QLatin1String("--randtest")
             || a == QLatin1String("--startuptest")) {
@@ -957,6 +978,7 @@ int main(int argc, char* argv[])
     // 卸载排着队的先落地：上一轮点过「卸载」但当时这个 dll 还加载在进程里（Windows 不放行），
     // 此刻谁都还没加载过插件，是唯一能真把它删干净的时机。
     PluginStore::applyPendingRemoves();
+    PluginStore::applyLocalReplacements();
     DevEnv::ensureDefaultPlugins();
     WebShortcuts::ensureDefaultWebs();
 
@@ -1194,13 +1216,6 @@ int main(int argc, char* argv[])
     if (args.contains("--gridtest"))
         return runPluginSelftest(QStringLiteral("grid"));
 
-    // --cliptest：「剪贴板」那一页的判据（过滤那条纯函数、**行号↔存储下标**的映射、
-    // 状态行说实话、双击复用 / Delete 删这条 / 清空 三条动作真落到数据上）。
-    // 跑在沙箱 APPDATA 里：它要往 clipboard.json 写夹具、要点清空，碰不到他真实的剪贴板历史。
-    if (args.contains("--cliptest"))
-        return runPluginSelftest(QStringLiteral("clipboard"), "ltoolPluginSelftest",
-                                 SelftestArg::None, 0, QString(), "clipboard");
-
     // --randtest：「随机数生成」那一页的判据（区间内、数量对、不重复取满、区间不够就说不行
     // 而不是静默少给、小数位数夹紧、字符集池子只算一份、UUID 形状与不撞 + 页面那八条）。
     // 一次都不 show()；剪贴板那一支在 offscreen 是内存桩，那条判据自己标 SKIP。
@@ -1234,6 +1249,7 @@ int main(int argc, char* argv[])
     // 名字为什么不叫 --plugin：Qt 自己把 "--plugin" 当命令行选项吃掉了 ——
     // 实测 argc 直接变成 1（--pluginx 就还在），所以这里换个不带歧义的名字。
     if (args.contains("--plugintest")) {
+        PluginHost::prepareShortcuts();
         int bad = 0;
         const auto check = [&bad](const char* name, const QString& got, const QString& want) {
             const bool ok = got == want;
@@ -1253,7 +1269,7 @@ int main(int argc, char* argv[])
                                               "startup", "user", "json", "base64", "shell",
                                               "record", "capture", "software", "downloads",
                                               "tasks", "grid", "language", "linuxdo",
-                                              "clipboard", "random" };
+                                              "random" };
         const QDir dir(PluginHost::pluginsDir());
         std::printf("INFO 插件目录：%s\n", dir.absolutePath().toUtf8().constData());
         const auto& metas = PluginHost::scan();
@@ -3824,120 +3840,15 @@ int main(int argc, char* argv[])
             const auto t6 = query(QStringLiteral("gongge"));
             checkPlugin("全拼 gongge 直达「图片排版」（关键词「宫格」开头）", QStringLiteral("grid"),
                         t6.first ? "yes" : "no", "yes");
-            // 电源那两条（2026-10-19 他点名：输 sleep/休眠 就休眠，输 shutdown/关机 就关机）。
-            // **这里只量路由**：第一行是不是那颗、target 对不对 —— 一次都不真按回车，
-            // 否则跑判据的这台机器当场就睡过去了。
-            const auto powerOf = [&](const QString& q) {
-                input->setText(q);
+            for (const auto& word : {QStringLiteral("休眠"), QStringLiteral("sleep"),
+                 QStringLiteral("关机"), QStringLiteral("shutdown /s"), QStringLiteral("shut")}) {
+                input->setText(word);
                 settle();
-                // 第 0 行是那一节的标题（addSection 先落一行标题），所以要找**第一条能按的行**
-                for (int i = 0; i < w.resultCount(); ++i) {
-                    const SearchResult& r = w.resultAt(i);
-                    if (!r.isSection)
-                        return r.target;
-                }
-                return QString();
-            };
-            check("输「休眠」第一行就是休眠那一条", powerOf(QStringLiteral("休眠")),
-                  QStringLiteral("power:hibernate"));
-            check("输 sleep 同上", powerOf(QStringLiteral("sleep")), QStringLiteral("power:hibernate"));
-            check("输「关机」第一行就是关机那一条", powerOf(QStringLiteral("关机")),
-                  QStringLiteral("power:shutdown"));
-            check("输 shutdown 同上", powerOf(QStringLiteral("shutdown")), QStringLiteral("power:shutdown"));
-            // 120ms 去抖那一拍不能被回车漏掉（他 2026-10-19 报"搜 shutdown 什么都没有搜出来"）：
-            // 故意不 settle —— 先看列表（还是上一个查询那一版，没有这条），再走 flushSearch
-            // （= 回车做的第一件事），这条就该出现了。
-            input->setText(QStringLiteral("zzz-这条什么都搜不到-qqq"));
-            settle();                     // 先把列表清干净，下面量的才是"少一拍"那一版
-            input->setText(QStringLiteral("shutdown"));
-            bool staleHas = false;
-            QStringList staleTargets;
-            for (int i = 0; i < w.resultCount(); ++i) {
-                staleTargets << (w.resultAt(i).isSection ? QStringLiteral("§")
-                                                         : w.resultAt(i).target.left(22));
-                if (w.resultAt(i).target == QLatin1String("power:shutdown"))
-                    staleHas = true;
-            }
-            std::printf("INFO 没补那一拍时列表长这样：%s\n",
-                        staleTargets.join(QStringLiteral(",")).left(200).toUtf8().constData());
-            w.flushSearch();
-            bool flushedHas = false;            for (int i = 0; i < w.resultCount(); ++i)
-                if (w.resultAt(i).target == QLatin1String("power:shutdown"))
-                    flushedHas = true;
-            check("回车前那一拍补得回来（不补=旧列表没这条，补了=有）",
-                  (!staleHas && flushedHas) ? QStringLiteral("yes") : QStringLiteral("no"),
-                  QStringLiteral("yes"));
-            std::printf("INFO 去抖那一拍：不补时列表里有 power 条=%d，补了之后=%d\n", staleHas ? 1 : 0,
-                        flushedHas ? 1 : 0);
-            // 这台机器（实测 `powercfg /a`：休眠「尚未启用」）不能休眠，那一行就得**当场**把
-            // powercfg /h on 说出来，而不是等他按下回车再报错。判据按机器的实际状态分支，
-            // 两种机器上都成立。
-            QString hibSub;
-            input->setText(QStringLiteral("休眠"));
-            settle();
-            for (int i = 0; i < w.resultCount(); ++i) {
-                const SearchResult& r = w.resultAt(i);
-                if (!r.isSection) {
-                    hibSub = r.subtitle;
-                    break;
-                }
-            }
-            const bool canHib = SysTools::hibernationEnabled();
-            std::printf("INFO 这台机器能休眠=%d，那一行写的是：%s\n", canHib ? 1 : 0,
-                        hibSub.toUtf8().constData());
-            check("没开休眠的那台机器，那一行点名 powercfg /h on（开了的不许出现这句）",
-                  (canHib != hibSub.contains(QStringLiteral("powercfg"))) ? QStringLiteral("yes")
-                                                                        : QStringLiteral("no"),
-                  QStringLiteral("yes"));
-            // 反向那条是安全绳：只有**整条相等**才算要点电源，搜"关机后…"绝不能把机器关了
-            const QString nearMiss = powerOf(QStringLiteral("关机后怎么恢复文件"));
-            check("整条相等才算：搜「关机后怎么恢复文件」不许把关机那条排第一",
-                  nearMiss == QStringLiteral("power:shutdown") ? QStringLiteral("yes") : QStringLiteral("no"),
-                  QStringLiteral("no"));
-            // 英文词按"命令行形状"放宽（他 2026-10-19 问"为什么没有 shutdown 的下拉选项"）：
-            // `shutdown.exe` / `shutdown /s` 是要动手，`shutdown 怎么用` 是在查资料。
-            const auto hasPower = [&](const QString& s, const char* want) {
-                input->setText(s);
-                settle();
+                bool power = false;
                 for (int i = 0; i < w.resultCount(); ++i)
-                    if (w.resultAt(i).target == QLatin1String(want))
-                        return true;
-                return false;
-            };
-            check("输 shutdown.exe 也算要点电源",
-                  hasPower(QStringLiteral("shutdown.exe"), "power:shutdown") ? QStringLiteral("yes")
-                                                                            : QStringLiteral("no"),
-                  QStringLiteral("yes"));
-            check("输 shutdown /s 也算",
-                  hasPower(QStringLiteral("shutdown /s"), "power:shutdown") ? QStringLiteral("yes")
-                                                                           : QStringLiteral("no"),
-                  QStringLiteral("yes"));
-            check("但「shutdown 怎么用」不算（那是查资料，不许把机器关了）",
-                  hasPower(QStringLiteral("shutdown 怎么用"), "power:shutdown") ? QStringLiteral("yes")
-                                                                               : QStringLiteral("no"),
-                  QStringLiteral("no"));
-            // 他 2026-10-19 补的一句：`shut` 也要出关机。走的是同一条"尾巴"规矩，
-            // 所以 `shut` / `shut.exe` 算，`shutter`、`shut down 怎么用` 这种尾巴是普通词的不算。
-            check("输 shut 也算要点电源",
-                  hasPower(QStringLiteral("shut"), "power:shutdown") ? QStringLiteral("yes")
-                                                                     : QStringLiteral("no"),
-                  QStringLiteral("yes"));
-            check("shut 后面带开关也算（shut /f）",
-                  hasPower(QStringLiteral("shut /f"), "power:shutdown") ? QStringLiteral("yes")
-                                                                       : QStringLiteral("no"),
-                  QStringLiteral("yes"));
-            check("但 shut 当前缀不算：shutter / 「shut down 怎么用」不许把机器关了",
-                  (!hasPower(QStringLiteral("shutter"), "power:shutdown")
-                   && !hasPower(QStringLiteral("shut down 怎么用"), "power:shutdown"))
-                      ? QStringLiteral("yes")
-                      : QStringLiteral("no"),
-                  QStringLiteral("yes"));
-            check("中文那条没放宽：「关机」整条才算，「关机后…」不算",
-                  (hasPower(QStringLiteral("关机"), "power:shutdown")
-                   && !hasPower(QStringLiteral("关机后怎么恢复文件"), "power:shutdown"))
-                      ? QStringLiteral("yes")
-                      : QStringLiteral("no"),
-                  QStringLiteral("yes"));
+                    power |= w.resultAt(i).target.startsWith(QLatin1String("power:"));
+                check("旧电源命令不再注册", power ? "yes" : "no", "no");
+            }
             // 他报的第三件事：搜 `gg` 搜不到 Google。原因是「广告弹窗」的首字母也是 gg，
             // 工具直达那一节 return 得早，网站那节根本没机会跑。规则改成"显式网站关键字 >
             // 工具名首字母拼音"之后：gg 归 Google，广告弹窗还能靠整串首字母 ggdc 或 广告 到达。
@@ -5904,12 +5815,21 @@ int main(int argc, char* argv[])
         win.openSettingsPage(3);   // 关于是第四行（菜单只剩四行）
     });
     QObject::connect(menu.addAction("重新扫描"), &QAction::triggered, &win, &SearchWindow::rescan);
-    // 这两项以前是直接 new 那两个工具窗（JsonTool/Base64Tool）。它们搬进 DLL 插件之后，
-    // 主程序够不着那两个类了，只能走和搜索框同一条路：弹设置页 → 展开那张卡。
-    QObject::connect(menu.addAction("JSON 格式化"), &QAction::triggered,
-                     [&win] { win.openTool(QStringLiteral("json")); });
-    QObject::connect(menu.addAction("Base64 编解码"), &QAction::triggered,
-                     [&win] { win.openTool(QStringLiteral("base64")); });
+    PluginHost::prepareShortcuts();
+    for (const auto& shortcut : PluginHost::shortcuts()) {
+        if (!shortcut.inTray)
+            continue;
+        auto* action = menu.addAction(shortcut.label);
+        const auto id = shortcut.id;
+        QObject::connect(action, &QAction::triggered, &win, [&win, id] {
+            if (PluginHost::shortcutAvailable(id))
+                win.openTool(id, {});
+        });
+        action->setVisible(PluginHost::shortcutAvailable(id));
+        QObject::connect(&menu, &QMenu::aboutToShow, action, [action, id] {
+            action->setVisible(PluginHost::shortcutAvailable(id));
+        });
+    }
     QAction* logAction = menu.addAction("安装日志");
     QObject::connect(logAction, &QAction::triggered, [] { SilentInstallLog::showLog(); });
     QAction* autoRun = menu.addAction("开机自启");
@@ -5926,7 +5846,7 @@ int main(int argc, char* argv[])
         }
     });
     menu.addSeparator();
-    QObject::connect(menu.addAction("退出"), &QAction::triggered, &QApplication::quit);
+    QObject::connect(menu.addAction("退出"), &QAction::triggered, &win, &SearchWindow::requestQuit);
     tray.setContextMenu(&menu);
     if (!inLoopSelftest)
         tray.show();
@@ -6013,9 +5933,16 @@ int main(int argc, char* argv[])
         FileIndexer::instance().restoreCachedSnapshot();
         QTimer::singleShot(loginStart ? 30000 : 0, &win, [&win] { win.startInitialScan(true); });
         TaskScheduler::instance().start();
-        ClipboardStore::instance().start();
-        QTimer::singleShot(loginStart ? 35000 : 0, &app, [&tray] {
-            HotaruNativeHost::start([&tray](QString note) {
+        auto lanOfferNotice = std::make_shared<bool>(false);
+        QObject::connect(&tray, &QSystemTrayIcon::messageClicked, &win, [&win, lanOfferNotice] {
+            if (!std::exchange(*lanOfferNotice, false) ||
+                !HotaruNativeHost::hasPendingFileOffer())
+                return;
+            win.openNativePlugin(QLatin1String(kHotaruLanFilesId));
+        });
+        QTimer::singleShot(loginStart ? 35000 : 0, &app, [&tray, lanOfferNotice] {
+            HotaruNativeHost::start([&tray, lanOfferNotice](QString note) {
+                *lanOfferNotice = true;
                 tray.showMessage(QStringLiteral("Hotaru 局域网文件分享"), note,
                                  QSystemTrayIcon::Information, 8000);
             });

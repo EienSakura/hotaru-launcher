@@ -270,7 +270,7 @@ jobs:
           # grid 那条自己算临时路径自己删（`src/main.cpp` 里 `--gridtest` 那一段写明了这一点）。
           tests=(--smoke --about --cfgcheck --appdirs --pinyin --seamtest --diskbranch --mfttest --storeexit --storetest --pathcfg)
           if [ "$HOTARU_PACKAGE_PLUGINS" = "ON" ]; then
-            tests+=(--plugintest --rowmenu --username --cliptest --gridtest --linuxdotest --randtest --startuptest)
+            tests+=(--plugintest --rowmenu --username --gridtest --linuxdotest --randtest --startuptest)
           fi
           for f in "${tests[@]}"; do
             echo "===== $f ====="

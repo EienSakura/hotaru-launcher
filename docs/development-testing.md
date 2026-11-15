@@ -8,4 +8,10 @@
 4. 在桌面创建 `测试资料/创作工具箱/热键验证🎵.wav`，空文件也可以。索引就绪后搜「热键验证」，确认完整文件名和路径；再搜「创作工具箱」，确认目录能打开、定位和固定。
 5. 可选：开发版自启关、开各登录一次，其余条件保持相同。记录是否抢焦点，以及同一款软件从登录到首个可用窗口的时间。测完关闭开发版自启，再移走测试目录。
 
-仅包含局域网开发预览模块的测试包需要执行[局域网实测清单](lan-preview-testing.md)（测试包内为 `LAN-TESTING.md`）。
+局域网预览开发包已包含三个局域网插件，首次启动默认关闭。独立安装测试另用三个 `hotaru-plugin-` ZIP，详见[局域网实测清单](lan-preview-testing.md)（预览包内为 `LAN-TESTING.md`）。
+
+## 插件仓库回归
+
+离屏运行 --hotarupluginrepositorytest <lan-core ZIP> <lan-clipboard ZIP> <lan-files ZIP> <ltool API v4 DLL> <测试直属 ZIP>。测试直属 DLL 由 CMake 目标 hotaru-repository-fixture 生成，再用 tools/package-plugin.ps1 以 repository-fixture 和 1.0.0 打成 ZIP。两种宿主都运行；默认使用临时密钥、模拟下载及隔离目录，不联系生产仓库。在五个参数后追加已发布的 index-v1.json 和 index-v1.sig，可验证宿主内置公钥；如需验证其他签名夹具，可在这两个文件前另传夹具公钥的十六进制值。开发版覆盖三包依赖下载、取消、超限和哈希错误，正式版覆盖正式签名夹具下载、重启及默认关闭；两版都检查本地 LAN 导入、目录回退、缓存、卸载和事务回退。
+
+如需同时验证发布工具生成的目录，在仓库自测的五个包参数后依次追加测试公钥的 64 位十六进制字符串、index-v1.json 和 index-v1.sig 的路径。只使用临时测试公钥。正式部署的信任根仍由构建时配置。

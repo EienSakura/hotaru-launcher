@@ -11,12 +11,14 @@
 #include <QFrame>
 #include <QLabel>
 #include <QLineEdit>
+#include <QMessageBox>
 #include <QListWidget>
 #include <QMimeData>
 #include <QPushButton>
 #include <QScrollArea>
 #include <QSignalBlocker>
 #include <QStandardPaths>
+#include <QStackedWidget>
 #include <QUrl>
 #include <QVBoxLayout>
 #include <algorithm>
@@ -48,6 +50,26 @@ QLabel* titleLabel(const QString& text, QWidget* parent)
     font.setPointSizeF(font.pointSizeF() + 2);
     label->setFont(font);
     return label;
+}
+
+QVBoxLayout* cardLayout(QFrame* card, const QString& title)
+{
+    card->setObjectName(QStringLiteral("lanDetailCard"));
+    card->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+    auto* layout = new QVBoxLayout(card);
+    layout->setContentsMargins(14, 12, 14, 12);
+    layout->setSpacing(10);
+    layout->addWidget(titleLabel(title, card));
+    return layout;
+}
+
+void addCardPair(QVBoxLayout* page, QFrame* left, QFrame* right)
+{
+    auto* row = new QHBoxLayout;
+    row->setSpacing(12);
+    row->addWidget(left, 1);
+    row->addWidget(right, 1);
+    page->addLayout(row);
 }
 
 class DropPanel final : public QFrame {
@@ -82,285 +104,531 @@ private:
     }
 };
 
-QWidget* pageFor(Service& service, int feature, QWidget* parent)
+QWidget* pageFor(Service& service, int feature, QWidget* parent, const QByteArray& target = {})
 {
+    const bool core = feature == 0;
     const bool files = feature == Files;
     auto* scroll = new QScrollArea(parent);
     scroll->setWidgetResizable(true);
     scroll->setFrameShape(QFrame::NoFrame);
+    auto* stack = core ? new QStackedWidget(parent) : nullptr;
+    if (stack)
+        stack->addWidget(scroll);
     auto* page = new QWidget(scroll);
     auto* layout = new QVBoxLayout(page);
-    layout->setContentsMargins(28, 12, 28, 24);
-    layout->setSpacing(16);
-    auto* title = titleLabel(files ? QStringLiteral("局域网文件分享") :
-                                    QStringLiteral("局域网剪贴板共享"), page);
-    layout->addWidget(title);
-    layout->addWidget(textLabel(files ? QStringLiteral("选择同一专用网络中的设备，发送文件或文件夹。接收前需要确认。") :
-                                       QStringLiteral("与已配对设备同步新复制的文本和图片。之前的内容不会补发。"), page));
-
-    auto* enable = new QCheckBox(QStringLiteral("启用此插件"), page);
+    layout->setContentsMargins(22, 12, 22, 20);
+    layout->setSpacing(12);
+    layout->addWidget(titleLabel(core ? QStringLiteral("局域网连接") : files ?
+        QStringLiteral("局域网文件分享") : QStringLiteral("局域网剪贴板共享"), page));
+    auto* enable = new QCheckBox(core ? QStringLiteral("启用局域网连接") : QStringLiteral("启用此插件"), page);
     auto* status = textLabel({}, page);
     auto* feedback = textLabel({}, page);
     layout->addWidget(enable);
     layout->addWidget(status);
-    auto* diagnostics = new QPushButton(QStringLiteral("打开诊断日志目录"), page);
-    layout->addWidget(diagnostics, 0, Qt::AlignLeft);
-    QObject::connect(diagnostics, &QPushButton::clicked, page, [=, &service] {
-        const auto directory = service.diagnosticDirectory();
-        if (!QDir().mkpath(directory) || !QDesktopServices::openUrl(QUrl::fromLocalFile(directory)))
-            feedback->setText(QStringLiteral("无法打开诊断日志目录。"));
+    const auto showError = [feedback](QString error) { feedback->setText(error); };
+    const auto refreshEnable = [=, &service] {
+        const QSignalBlocker block(enable);
+        enable->setChecked(core ? service.coreEnabled() : service.requested(feature));
+        enable->setEnabled(core || service.coreEnabled());
+        if (core)
+            status->setText(service.coreEnabled() ? QStringLiteral("在两台电脑上打开此页，只需配对一次。")
+                                                  : QStringLiteral("连接已关闭"));
+        else if (!service.coreEnabled())
+            status->setText(QStringLiteral("请先启用局域网连接。"));
+        else if (!service.enabled(feature))
+            status->setText(QStringLiteral("插件已关闭。"));
+        else {
+            int online = 0;
+            for (const auto& device : service.devices())
+                if (device.features & feature)
+                    ++online;
+            status->setText(online ? QStringLiteral("%1 台设备可用").arg(online)
+                                   : QStringLiteral("等待已配对设备上线并启用此功能。"));
+        }
+    };
+    QObject::connect(enable, &QCheckBox::toggled, page, [=, &service](bool on) {
+        QString error;
+        if (core)
+            service.setCoreEnabled(on, error);
+        else
+            service.setEnabled(feature, on, error);
+        showError(error);
+        refreshEnable();
     });
+    QObject::connect(&service, &Service::changed, page, refreshEnable);
+    refreshEnable();
 
-    auto* connection = new QFrame(page);
-    connection->setFrameShape(QFrame::StyledPanel);
-    auto* connectionLayout = new QVBoxLayout(connection);
-    connectionLayout->setContentsMargins(16, 12, 16, 12);
-    connectionLayout->addWidget(titleLabel(QStringLiteral("共享连接设置"), connection));
-    connectionLayout->addWidget(textLabel(
-        QStringLiteral("两项插件共用设备名和安全码。两台设备填写相同的码，建议生成长码。"), connection));
-    auto* fields = new QFormLayout;
-    auto* name = new QLineEdit(service.name(), connection);
-    name->setMaxLength(48);
-    auto* code = new QLineEdit(connection);
-    code->setEchoMode(QLineEdit::Password);
-    code->setMaxLength(128);
-    auto* clipboardAlias = new QLineEdit(service.clipboardSearchAlias(), connection);
-    clipboardAlias->setMaxLength(24);
-    clipboardAlias->setPlaceholderText(QStringLiteral("留空关闭，例如 jtb"));
-    fields->addRow(QStringLiteral("设备名"), name);
-    fields->addRow(QStringLiteral("安全码"), code);
-    if (!files)
-        fields->addRow(QStringLiteral("剪贴板快捷词"), clipboardAlias);
-    connectionLayout->addLayout(fields);
-    auto* actions = new QHBoxLayout;
-    auto* generate = new QPushButton(QStringLiteral("生成长码"), connection);
-    auto* copy = new QPushButton(QStringLiteral("复制已保存的码"), connection);
-    auto* save = new QPushButton(QStringLiteral("保存"), connection);
-    actions->addWidget(generate);
-    actions->addWidget(copy);
-    actions->addStretch();
-    actions->addWidget(save);
-    connectionLayout->addLayout(actions);
-    layout->addWidget(connection);
-    layout->addWidget(feedback);
+    if (core) {
+        auto* form = new QFormLayout;
+        auto* name = new QLineEdit(service.name(), page);
+        name->setMaxLength(48);
+        auto* save = new QPushButton(QStringLiteral("保存设备名"), page);
+        form->addRow(QStringLiteral("此电脑的名称"), name);
+        form->addRow(save);
+        layout->addLayout(form);
+        QObject::connect(save, &QPushButton::clicked, page, [=, &service] {
+            QString error;
+            if (service.configure(name->text(), error))
+                name->setText(service.name());
+            showError(error);
+        });
 
-    auto* devices = new QComboBox(page);
-    devices->setAccessibleName(QStringLiteral("已配对设备"));
-    auto* discovered = new QListWidget(page);
-    discovered->setObjectName(QStringLiteral("discoveredDevices"));
-    discovered->setAccessibleName(QStringLiteral("已发现设备"));
-    discovered->setMaximumHeight(110);
-    auto* probeRow = new QHBoxLayout;
-    auto* probeAddress = new QLineEdit(page);
-    probeAddress->setPlaceholderText(QStringLiteral("手动探测 IPv4，例如 192.168.1.20"));
-    auto* probe = new QPushButton(QStringLiteral("探测"), page);
-    probeRow->addWidget(probeAddress, 1);
-    probeRow->addWidget(probe);
-    layout->addWidget(titleLabel(QStringLiteral("已发现设备"), page));
-    layout->addWidget(discovered);
-    layout->addLayout(probeRow);
-    layout->addWidget(titleLabel(QStringLiteral("已配对设备"), page));
-    layout->addWidget(devices);
+        layout->addWidget(titleLabel(QStringLiteral("配对新设备"), page));
+        layout->addWidget(textLabel(QStringLiteral("生成邀请码后，同一专用网络的 Hotaru 可看到此电脑的名称和地址。"), page));
+        auto* create = new QPushButton(QStringLiteral("生成邀请码"), page);
+        auto* cancel = new QPushButton(QStringLiteral("取消邀请"), page);
+        auto* codeText = textLabel({}, page);
+        auto* inviteRow = new QHBoxLayout;
+        inviteRow->addWidget(create);
+        inviteRow->addWidget(cancel);
+        inviteRow->addWidget(codeText, 1);
+        layout->addLayout(inviteRow);
+        auto* discover = new QPushButton(QStringLiteral("发现邀请 ›"), page);
+        layout->addWidget(discover, 0, Qt::AlignLeft);
+        auto* invitationScroll = new QScrollArea(stack);
+        invitationScroll->setWidgetResizable(true);
+        invitationScroll->setFrameShape(QFrame::NoFrame);
+        auto* invitationPage = new QWidget(invitationScroll);
+        invitationScroll->setWidget(invitationPage);
+        auto* invitationLayout = new QVBoxLayout(invitationPage);
+        invitationLayout->setContentsMargins(22, 12, 22, 20);
+        invitationLayout->setSpacing(12);
+        stack->addWidget(invitationScroll);
+        auto* back = new QPushButton(QStringLiteral("返回局域网连接"), invitationPage);
+        invitationLayout->addWidget(back, 0, Qt::AlignLeft);
+        invitationLayout->addWidget(titleLabel(QStringLiteral("发现邀请"), invitationPage));
+        invitationLayout->addWidget(textLabel(QStringLiteral("请选择正在邀请的电脑，或手动填写 IPv4。设备名称仅供辨认，请与对方核对。"), invitationPage));
+        auto* candidates = new QComboBox(invitationPage);
+        candidates->setAccessibleName(QStringLiteral("正在邀请的设备"));
+        auto* address = new QLineEdit(invitationPage);
+        address->setPlaceholderText(QStringLiteral("未发现时，输入对方电脑的 IPv4"));
+        auto* code = new QLineEdit(invitationPage);
+        code->setMaxLength(5);
+        code->setPlaceholderText(QStringLiteral("五位邀请码"));
+        code->setAccessibleName(QStringLiteral("五位邀请码"));
+        auto* join = new QPushButton(QStringLiteral("发起配对"), invitationPage);
+        auto* joinForm = new QFormLayout;
+        joinForm->addRow(QStringLiteral("发现的邀请"), candidates);
+        joinForm->addRow(QStringLiteral("手动填写地址"), address);
+        joinForm->addRow(QStringLiteral("邀请码"), code);
+        joinForm->addRow(join);
+        invitationLayout->addLayout(joinForm);
+        auto* joinStatus = textLabel({}, invitationPage);
+        auto* joinError = textLabel({}, invitationPage);
+        invitationLayout->addWidget(joinStatus);
+        invitationLayout->addWidget(joinError);
+        invitationLayout->addStretch();
+        QObject::connect(discover, &QPushButton::clicked, invitationPage, [=] {
+            stack->setCurrentWidget(invitationScroll);
+            code->setFocus();
+        });
+        QObject::connect(back, &QPushButton::clicked, page, [=] {
+            stack->setCurrentWidget(scroll);
+            discover->setFocus();
+        });
+        auto* request = textLabel({}, page);
+        layout->addWidget(request);
+        auto* confirm = new QPushButton(QStringLiteral("确认配对"), page);
+        auto* reject = new QPushButton(QStringLiteral("拒绝"), page);
+        auto* requestRow = new QHBoxLayout;
+        requestRow->addWidget(confirm);
+        requestRow->addWidget(reject);
+        requestRow->addStretch();
+        layout->addLayout(requestRow);
+        auto* pairing = textLabel({}, page);
+        layout->addWidget(pairing);
 
-    DropPanel* outgoing = nullptr;
-    QLabel *outStatus = nullptr, *inStatus = nullptr, *pending = nullptr;
-    QPushButton *sendFiles = nullptr, *sendFolder = nullptr, *retry = nullptr, *cancelOut = nullptr;
-    QPushButton *accept = nullptr, *decline = nullptr, *cancelIn = nullptr;
-    if (files) {
-        outgoing = new DropPanel(page);
-        auto* out = new QVBoxLayout(outgoing);
-        out->addWidget(titleLabel(QStringLiteral("发送"), outgoing));
-        out->addWidget(textLabel(QStringLiteral("也可以把文件或文件夹拖到此处。"), outgoing));
-        outStatus = textLabel({}, outgoing);
-        out->addWidget(outStatus);
-        auto* row = new QHBoxLayout;
-        sendFiles = new QPushButton(QStringLiteral("选文件"), outgoing);
-        sendFolder = new QPushButton(QStringLiteral("选文件夹"), outgoing);
-        retry = new QPushButton(QStringLiteral("重试"), outgoing);
-        cancelOut = new QPushButton(QStringLiteral("取消"), outgoing);
-        for (auto* button : {sendFiles, sendFolder, retry, cancelOut})
-            row->addWidget(button);
-        row->addStretch();
-        out->addLayout(row);
-        layout->addWidget(outgoing);
+        layout->addWidget(titleLabel(QStringLiteral("已配对设备"), page));
+        auto* devices = new QListWidget(page);
+        devices->setAccessibleName(QStringLiteral("已配对设备"));
+        devices->setMaximumHeight(136);
+        layout->addWidget(devices);
+        auto* forget = new QPushButton(QStringLiteral("撤销所选设备"), page);
+        layout->addWidget(forget, 0, Qt::AlignLeft);
 
+        auto* diagnostics = new QPushButton(QStringLiteral("连接诊断 ▸"), page);
+        diagnostics->setCheckable(true);
+        layout->addWidget(diagnostics, 0, Qt::AlignLeft);
+        auto* diagnosticPanel = new QWidget(page);
+        auto* details = new QVBoxLayout(diagnosticPanel);
+        details->setContentsMargins(0, 0, 0, 0);
+        auto* network = textLabel({}, diagnosticPanel);
+        details->addWidget(network);
+        auto* probeAddress = new QLineEdit(diagnosticPanel);
+        probeAddress->setPlaceholderText(QStringLiteral("手动探测 IPv4"));
+        auto* probe = new QPushButton(QStringLiteral("探测"), diagnosticPanel);
+        auto* probeRow = new QHBoxLayout;
+        probeRow->addWidget(probeAddress);
+        probeRow->addWidget(probe);
+        details->addLayout(probeRow);
+        auto* logs = new QPushButton(QStringLiteral("打开诊断日志目录"), diagnosticPanel);
+        details->addWidget(logs, 0, Qt::AlignLeft);
+        QObject::connect(diagnostics, &QPushButton::toggled, diagnostics, [diagnostics](bool open) {
+            diagnostics->setText(open ? QStringLiteral("连接诊断 ▾") : QStringLiteral("连接诊断 ▸"));
+        });
+        diagnosticPanel->hide();
+        layout->addWidget(diagnosticPanel);
+        QObject::connect(diagnostics, &QPushButton::toggled, diagnosticPanel, &QWidget::setVisible);
+        QObject::connect(logs, &QPushButton::clicked, page, [=, &service] {
+            const auto path = service.diagnosticDirectory();
+            if (!QDir().mkpath(path) || !QDesktopServices::openUrl(QUrl::fromLocalFile(path)))
+                showError(QStringLiteral("无法打开诊断日志目录"));
+        });
+        QObject::connect(probe, &QPushButton::clicked, page, [=, &service] {
+            QString error;
+            showError(service.probeAddress(probeAddress->text(), error)
+                ? QStringLiteral("已发送探测，请等待回应") : error);
+        });
+
+        const auto refresh = [=, &service] {
+            const auto invitation = service.invitationCode();
+            const auto pending = service.pairingRequest();
+            const auto old = candidates->currentData();
+            QList<QPair<QString, QString>> options;
+            for (const auto& item : service.discoveredDevices()) {
+                if (!(item.features & 1) || std::any_of(options.cbegin(), options.cend(),
+                        [&](const auto& option) { return option.second == item.address; }))
+                    continue;
+                const auto label = item.name.isEmpty() ? QStringLiteral("未知电脑") : item.name;
+                options.append({QStringLiteral("%1 · %2").arg(label, item.address), item.address});
+            }
+            discover->setEnabled(service.coreEnabled());
+            discover->setText(options.isEmpty() ? QStringLiteral("发现邀请 ›")
+                                                : QStringLiteral("发现邀请（%1） ›").arg(options.size()));
+            QList<QPair<QString, QString>> previous;
+            for (int i = 0; i < candidates->count(); ++i)
+                if (const auto ip = candidates->itemData(i).toString(); !ip.isEmpty())
+                    previous.append({candidates->itemText(i), ip});
+            if (previous != options || candidates->count() == 0) {
+                const QSignalBlocker block(candidates);
+                candidates->clear();
+                if (options.isEmpty())
+                    candidates->addItem(QStringLiteral("暂无邀请"));
+                else if (options.size() > 1)
+                    candidates->addItem(QStringLiteral("选择正在邀请的电脑"));
+                for (const auto& [label, ip] : options)
+                    candidates->addItem(label, ip);
+                const int index = candidates->findData(old);
+                if (index >= 0 && options.size() != 1)
+                    candidates->setCurrentIndex(index);
+            }
+            network->setText(service.status());
+            create->setEnabled(service.coreEnabled() && !service.invitationInProgress());
+            cancel->setVisible(service.invitationInProgress());
+            codeText->setText(invitation.isEmpty() ? QString{} : QStringLiteral("%1 · 两分钟内有效\n%2 · %3")
+                .arg(QString::fromLatin1(invitation), service.name(), service.invitationAddresses().join(QStringLiteral("、"))));
+            address->setEnabled(service.coreEnabled());
+            code->setEnabled(service.coreEnabled());
+            join->setEnabled(service.coreEnabled());
+            request->setText(pending.isEmpty() ? QString{} : QStringLiteral("「%1」请求配对，请核对设备名称。").arg(pending));
+            confirm->setVisible(!pending.isEmpty());
+            reject->setVisible(!pending.isEmpty());
+            pairing->setText(service.pairingStatus());
+            joinStatus->setText(service.pairingStatus());
+            const auto current = devices->currentItem() ? devices->currentItem()->data(Qt::UserRole) : QVariant{};
+            const auto peers = service.pairedDevices();
+            bool same = devices->count() == peers.size();
+            for (int i = 0; same && i < peers.size(); ++i) {
+                const auto& device = peers.at(i);
+                const auto title = QStringLiteral("%1 · %2").arg(device.name,
+                    device.lastSeen < 0 ? QStringLiteral("离线") : QStringLiteral("在线"));
+                same = devices->item(i)->data(Qt::UserRole).toByteArray() == device.id &&
+                       devices->item(i)->text() == title;
+            }
+            if (!same) {
+                devices->clear();
+                for (const auto& device : peers) {
+                    auto* row = new QListWidgetItem(QStringLiteral("%1 · %2").arg(device.name,
+                        device.lastSeen < 0 ? QStringLiteral("离线") : QStringLiteral("在线")), devices);
+                    row->setData(Qt::UserRole, device.id);
+                    if (current.toByteArray() == device.id)
+                        devices->setCurrentItem(row);
+                }
+            }
+            forget->setEnabled(devices->currentItem());
+        };
+        QObject::connect(&service, &Service::changed, page, refresh);
+        QObject::connect(devices, &QListWidget::currentItemChanged, page, [forget](QListWidgetItem* item) {
+            forget->setEnabled(item != nullptr);
+        });
+        QObject::connect(create, &QPushButton::clicked, page, [=, &service] {
+            QString error;
+            service.beginInvitation(error);
+            showError(error);
+        });
+        QObject::connect(cancel, &QPushButton::clicked, page, [&service] { service.cancelInvitation(); });
+        QObject::connect(join, &QPushButton::clicked, page, [=, &service] {
+            QString error;
+            const auto ip = address->text().trimmed().isEmpty() ? candidates->currentData().toString()
+                                                                : address->text().trimmed();
+            if (ip.isEmpty())
+                error = QStringLiteral("请选择对方设备，或填写对方 IPv4");
+            else if (service.joinInvitation(ip, code->text(), error))
+                code->clear();
+            joinError->setText(error);
+        });
+        QObject::connect(code, &QLineEdit::returnPressed, join, &QPushButton::click);
+        const auto decide = [=, &service](bool yes) {
+            QString error;
+            service.decidePairing(yes, error);
+            showError(error);
+        };
+        QObject::connect(confirm, &QPushButton::clicked, page, [decide] { decide(true); });
+        QObject::connect(reject, &QPushButton::clicked, page, [decide] { decide(false); });
+        QObject::connect(forget, &QPushButton::clicked, page, [=, &service] {
+            if (!devices->currentItem())
+                return;
+            const auto id = devices->currentItem()->data(Qt::UserRole).toByteArray();
+            if (QMessageBox::question(page, QStringLiteral("撤销配对"), QStringLiteral("以后需要重新配对才能连接这台设备。确认撤销？"))
+                    != QMessageBox::Yes)
+                return;
+            QString error;
+            service.forgetDevice(id, error);
+            showError(error);
+        });
+        refresh();
+    } else if (!files) {
+        auto* sync = new QFrame(page);
+        auto* syncLayout = cardLayout(sync, QStringLiteral("同步与快捷词"));
+        auto* history = new QFrame(page);
+        history->setProperty("hotaruClipboardHistorySlot", true);
+        cardLayout(history, QStringLiteral("本机记录"));
+        addCardPair(layout, sync, history);
+        syncLayout->addWidget(textLabel(QStringLiteral("只同步启用后新复制的文本和图片。"), sync));
+        auto* devices = textLabel({}, sync);
+        syncLayout->addWidget(devices);
+        const auto refresh = [=, &service] {
+            QStringList names;
+            for (const auto& device : service.devices())
+                if (service.enabled(Clipboard) && (device.features & Clipboard))
+                    names.push_back(device.name);
+            devices->setText(names.isEmpty() ? QStringLiteral("暂无在线同步设备")
+                                             : QStringLiteral("同步设备：%1").arg(names.join(QStringLiteral("、"))));
+        };
+        QObject::connect(&service, &Service::changed, page, refresh);
+        refresh();
+        auto* alias = new QLineEdit(service.clipboardSearchAlias(), sync);
+        alias->setMaxLength(24);
+        alias->setPlaceholderText(QStringLiteral("留空关闭，例如 clip"));
+        auto* aliasLabel = textLabel(QStringLiteral("剪贴板快捷词"), sync);
+        aliasLabel->setBuddy(alias);
+        syncLayout->addWidget(aliasLabel);
+        syncLayout->addWidget(alias);
+        auto* save = new QPushButton(QStringLiteral("保存快捷词"), sync);
+        syncLayout->addWidget(save, 0, Qt::AlignLeft);
+        syncLayout->addStretch();
+        QObject::connect(save, &QPushButton::clicked, page, [=, &service] {
+            QString error;
+            if (service.setClipboardSearchAlias(alias->text(), error))
+                alias->setText(service.clipboardSearchAlias());
+            showError(error);
+        });
+    } else {
+        auto* outgoing = new DropPanel(page);
         auto* incoming = new QFrame(page);
-        incoming->setFrameShape(QFrame::StyledPanel);
-        auto* in = new QVBoxLayout(incoming);
-        in->addWidget(titleLabel(QStringLiteral("接收"), incoming));
-        inStatus = textLabel({}, incoming);
-        pending = textLabel({}, incoming);
+        outgoing->setProperty("lanTransferSide", QStringLiteral("send"));
+        incoming->setProperty("lanTransferSide", QStringLiteral("receive"));
+        addCardPair(layout, outgoing, incoming);
+        auto* in = cardLayout(incoming, QStringLiteral("接收文件"));
+        in->addWidget(textLabel(QStringLiteral("收到请求后，确认才会保存文件。"), incoming));
+        auto* inStatus = textLabel({}, incoming);
         in->addWidget(inStatus);
+        auto* pending = textLabel({}, incoming);
         in->addWidget(pending);
+        auto* receive = new QPushButton(QStringLiteral("接收"), incoming);
+        receive->setObjectName(QStringLiteral("primary"));
+        auto* choose = new QPushButton(QStringLiteral("另存到"), incoming);
+        auto* decline = new QPushButton(QStringLiteral("拒绝"), incoming);
+        auto* cancelIn = new QPushButton(QStringLiteral("取消接收"), incoming);
         auto* inRow = new QHBoxLayout;
-        accept = new QPushButton(QStringLiteral("选择目录并接收"), incoming);
-        decline = new QPushButton(QStringLiteral("拒绝"), incoming);
-        cancelIn = new QPushButton(QStringLiteral("取消"), incoming);
-        for (auto* button : {accept, decline, cancelIn})
+        for (auto* button : {receive, choose, decline, cancelIn})
             inRow->addWidget(button);
         inRow->addStretch();
         in->addLayout(inRow);
-        layout->addWidget(incoming);
-
-        const auto share = [&service, devices](const QStringList& paths) {
-            if (!paths.isEmpty())
-                service.share(devices->currentData().toByteArray(), paths);
+        in->addStretch();
+        auto* directoryLabel = textLabel(QStringLiteral("默认接收目录"), incoming);
+        directoryLabel->setObjectName(QStringLiteral("muted"));
+        in->addWidget(directoryLabel);
+        auto* directory = textLabel({}, incoming);
+        directory->setTextInteractionFlags(Qt::TextSelectableByMouse);
+        directory->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+        in->addWidget(directory);
+        auto* changeDirectory = new QPushButton(QStringLiteral("修改目录"), incoming);
+        in->addWidget(changeDirectory, 0, Qt::AlignLeft);
+        const auto accept = [=, &service](const QString& path) {
+            QString error;
+            service.receiveFiles(path, error);
+            showError(error);
         };
-        outgoing->dropped = share;
-        QObject::connect(sendFiles, &QPushButton::clicked, page, [page, share] {
-            share(QFileDialog::getOpenFileNames(page, QStringLiteral("选择要发送的文件")));
+        QObject::connect(receive, &QPushButton::clicked, page, [=, &service] { accept(service.downloadDirectory()); });
+        QObject::connect(choose, &QPushButton::clicked, page, [=, &service] {
+            const auto path = QFileDialog::getExistingDirectory(page, QStringLiteral("选择接收目录"), service.downloadDirectory());
+            if (!path.isEmpty())
+                accept(path);
         });
-        QObject::connect(sendFolder, &QPushButton::clicked, page, [page, share] {
-            const auto folder = QFileDialog::getExistingDirectory(page, QStringLiteral("选择要发送的文件夹"));
-            if (!folder.isEmpty())
-                share({folder});
-        });
-        QObject::connect(retry, &QPushButton::clicked, page, [&service, share] {
-            share(service.transfers().retryPaths());
-        });
-        QObject::connect(accept, &QPushButton::clicked, page, [&service, page] {
-            const auto target = QFileDialog::getExistingDirectory(page, QStringLiteral("选择接收目录"),
-                QStandardPaths::writableLocation(QStandardPaths::DownloadLocation));
-            if (!target.isEmpty())
-                service.transfers().accept(target);
+        QObject::connect(changeDirectory, &QPushButton::clicked, page, [=, &service] {
+            const auto path = QFileDialog::getExistingDirectory(page, QStringLiteral("选择默认接收目录"), service.downloadDirectory());
+            if (path.isEmpty())
+                return;
+            QString error;
+            service.setDownloadDirectory(path, error);
+            showError(error);
         });
         QObject::connect(decline, &QPushButton::clicked, page, [&service] { service.transfers().decline(); });
         QObject::connect(cancelIn, &QPushButton::clicked, page, [&service] { service.transfers().cancelIncoming(); });
-        QObject::connect(cancelOut, &QPushButton::clicked, page, [&service] { service.transfers().cancelOutgoing(); });
-    }
 
-    const auto refresh = [=, &service] {
-        {
-            QSignalBlocker block(enable);
-            enable->setChecked(service.enabled(feature));
-        }
-        status->setText(service.status());
-        code->setPlaceholderText(service.hasCode() ? QStringLiteral("已保存，留空保留当前安全码")
-                                                   : QStringLiteral("填写至少 6 个字符"));
-        copy->setEnabled(service.hasCode());
-        const auto found = service.discoveredDevices();
-        discovered->clear();
-        for (const auto& item : found) {
-            const auto suffix = QString::fromLatin1(item.id.toHex().right(8));
-            QString state = QStringLiteral("等待自动认证");
-            if (item.paired)
-                state = QStringLiteral("已配对");
-            else if (item.phase == Network::Phase::Connecting)
-                state = QStringLiteral("正在连接");
-            else if (item.phase == Network::Phase::Authenticating)
-                state = QStringLiteral("正在认证");
-            else if (item.phase == Network::Phase::Failed)
-                state = QStringLiteral("连接未完成，等待重试");
-            else if (item.phase == Network::Phase::Rejected)
-                state = QStringLiteral("校验未通过，请核对安全码");
-            discovered->addItem(QStringLiteral("%1 · %2 · %3")
-                                    .arg(state)
-                                    .arg(item.address)
-                                    .arg(suffix));
-        }
-        if (found.isEmpty())
-            discovered->addItem(QStringLiteral("暂未发现设备；可使用上方 IPv4 探测"));
-        const auto selected = devices->currentData().toByteArray();
-        QList<Service::Device> relevant;
-        for (const auto& item : service.devices())
-            if (item.features & feature)
-                relevant.push_back(item);
-        bool unchanged = devices->count() == relevant.size() && !relevant.isEmpty();
-        for (qsizetype i = 0; unchanged && i < relevant.size(); ++i)
-            unchanged = devices->itemData(int(i)).toByteArray() == relevant[i].id &&
-                        devices->itemText(int(i)) == relevant[i].name;
-        if (!unchanged) {
-            QSignalBlocker block(devices);
-            devices->clear();
-            for (const auto& item : relevant)
-                devices->addItem(item.name, item.id);
-            if (relevant.isEmpty())
-                devices->addItem(QStringLiteral("暂无支持此功能的设备"));
-            const auto index = devices->findData(selected);
-            if (index >= 0)
-                devices->setCurrentIndex(index);
-        }
-        devices->setEnabled(!relevant.isEmpty());
-        if (!files)
-            return;
-        const auto& transfers = service.transfers();
-        outStatus->setText(transfers.outgoingStatus().isEmpty() ? QStringLiteral("暂无发送任务")
-                                                               : transfers.outgoingStatus());
-        inStatus->setText(transfers.incomingStatus().isEmpty() ? QStringLiteral("暂无接收任务")
-                                                              : transfers.incomingStatus());
-        pending->setText(transfers.pendingSummary());
-        pending->setVisible(transfers.awaitingDecision());
-        const bool canSend = service.enabled(Files) && !transfers.outgoing() && !relevant.isEmpty();
-        outgoing->setAcceptDrops(canSend);
-        sendFiles->setEnabled(canSend);
-        sendFolder->setEnabled(canSend);
-        retry->setEnabled(canSend && !transfers.retryPaths().isEmpty());
-        cancelOut->setEnabled(transfers.outgoing());
-        accept->setEnabled(transfers.awaitingDecision());
-        decline->setEnabled(transfers.awaitingDecision());
-        cancelIn->setEnabled(transfers.incoming() && !transfers.awaitingDecision());
-    };
+        auto* out = cardLayout(outgoing, QStringLiteral("发送文件"));
+        auto* devices = new QComboBox(outgoing);
+        devices->setAccessibleName(QStringLiteral("发送到"));
+        devices->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
+        devices->setMinimumContentsLength(12);
+        auto* deviceLabel = textLabel(QStringLiteral("发送到"), outgoing);
+        deviceLabel->setBuddy(devices);
+        out->addWidget(deviceLabel);
+        out->addWidget(devices);
+        auto* dropHint = textLabel(QStringLiteral("将文件或文件夹拖到此栏，也可以用下方按钮选择。"), outgoing);
+        dropHint->setObjectName(QStringLiteral("lanDropHint"));
+        dropHint->setMinimumHeight(48);
+        dropHint->setAlignment(Qt::AlignCenter);
+        out->addWidget(dropHint);
+        auto* send = new QPushButton(QStringLiteral("选文件"), outgoing);
+        send->setObjectName(QStringLiteral("primary"));
+        auto* folder = new QPushButton(QStringLiteral("选文件夹"), outgoing);
+        auto* retry = new QPushButton(QStringLiteral("重试"), outgoing);
+        auto* cancelOut = new QPushButton(QStringLiteral("取消发送"), outgoing);
+        auto* outRow = new QHBoxLayout;
+        for (auto* button : {send, folder})
+            outRow->addWidget(button);
+        outRow->addStretch();
+        out->addLayout(outRow);
+        out->addStretch();
+        auto* outStatus = textLabel({}, outgoing);
+        out->addWidget(outStatus);
+        auto* outActions = new QHBoxLayout;
+        outActions->addWidget(retry);
+        outActions->addWidget(cancelOut);
+        outActions->addStretch();
+        out->addLayout(outActions);
+        QWidget::setTabOrder(enable, devices);
+        QWidget::setTabOrder(devices, send);
+        QWidget::setTabOrder(send, folder);
+        QWidget::setTabOrder(folder, retry);
+        QWidget::setTabOrder(retry, cancelOut);
+        QWidget::setTabOrder(cancelOut, receive);
+        QWidget::setTabOrder(receive, choose);
+        QWidget::setTabOrder(choose, decline);
+        QWidget::setTabOrder(decline, cancelIn);
+        QWidget::setTabOrder(cancelIn, changeDirectory);
 
-    QObject::connect(&service, &Service::changed, page, refresh);
-    QObject::connect(enable, &QCheckBox::toggled, page, [=, &service](bool checked) {
-        QString error;
-        service.setEnabled(feature, checked, error);
-        feedback->setText(error);
-        refresh();
-    });
-    QObject::connect(generate, &QPushButton::clicked, page, [=] {
-        const auto value = randomBytes(18).toBase64(QByteArray::Base64UrlEncoding | QByteArray::OmitTrailingEquals);
-        if (value.isEmpty()) {
-            feedback->setText(QStringLiteral("无法生成安全码，请重试。"));
-            return;
-        }
-        code->setText(QString::fromLatin1(value));
-        feedback->setText(QStringLiteral("长码已生成，保存后可复制。"));
-    });
-    QObject::connect(copy, &QPushButton::clicked, page, [=, &service] {
-        service.copyCode();
-        feedback->setText(QStringLiteral("已复制安全码，不会同步或进入 Hotaru 剪贴板历史。"));
-    });
-    QObject::connect(save, &QPushButton::clicked, page, [=, &service] {
-        QString error;
-        if (service.configure(name->text(), code->text(), error)) {
-            if (!files && !service.setClipboardSearchAlias(clipboardAlias->text(), error)) {
-                feedback->setText(error);
+        const auto share = [=, &service](const QStringList& paths) {
+            if (paths.isEmpty())
                 return;
+            QString error;
+            service.sendFiles(devices->currentData().toByteArray(), paths, error);
+            showError(error);
+        };
+        outgoing->dropped = share;
+        QObject::connect(send, &QPushButton::clicked, page, [=] {
+            share(QFileDialog::getOpenFileNames(page, QStringLiteral("选择要发送的文件")));
+        });
+        QObject::connect(folder, &QPushButton::clicked, page, [=] {
+            const auto path = QFileDialog::getExistingDirectory(page, QStringLiteral("选择要发送的文件夹"));
+            if (!path.isEmpty())
+                share({path});
+        });
+        QObject::connect(retry, &QPushButton::clicked, page, [=, &service] { share(service.transfers().retryPaths()); });
+        QObject::connect(cancelOut, &QPushButton::clicked, page, [&service] { service.transfers().cancelOutgoing(); });
+
+        const auto refresh = [=, &service] {
+            auto selected = devices->currentIndex() >= 0 ? devices->currentData().toByteArray() : target;
+            const auto local = service.devices();
+            QList<Service::Device> peers;
+            for (const auto& device : local)
+                if (device.features & Files)
+                    peers.push_back(device);
+            bool same = devices->count() == peers.size();
+            for (int i = 0; same && i < peers.size(); ++i)
+                same = devices->itemData(i).toByteArray() == peers[i].id && devices->itemText(i) == peers[i].name;
+            if (!same) {
+                const QSignalBlocker block(devices);
+                devices->clear();
+                for (const auto& peer : peers)
+                    devices->addItem(peer.name, peer.id);
+                const int index = devices->findData(selected);
+                if (index >= 0 || !selected.isEmpty())
+                    devices->setCurrentIndex(index);
             }
-            code->clear();
-            name->setText(service.name());
-            clipboardAlias->setText(service.clipboardSearchAlias());
-            feedback->setText(QStringLiteral("连接设置已保存。"));
-        } else {
-            feedback->setText(error);
-        }
-    });
-    QObject::connect(probe, &QPushButton::clicked, page, [=, &service] {
-        QString error;
-        if (!service.probeAddress(probeAddress->text(), error))
-            feedback->setText(error);
-        else
-            feedback->setText(QStringLiteral("已发送探测，请等待设备回应。"));
-    });
-    refresh();
+            auto& transfers = service.transfers();
+            const bool waiting = transfers.awaitingDecision();
+            const auto inText = transfers.incomingStatus();
+            const auto outText = transfers.outgoingStatus();
+            inStatus->setText(inText.isEmpty() ? QStringLiteral("暂无待接收文件") : inText);
+            outStatus->setText(outText.isEmpty() ? QStringLiteral("暂无发送任务") : outText);
+            devices->setPlaceholderText(peers.isEmpty() ? QStringLiteral("暂无可发送设备")
+                                                        : QStringLiteral("请选择设备"));
+            devices->setEnabled(service.enabled(Files) && !peers.isEmpty());
+            pending->setText(transfers.pendingSummary());
+            pending->setVisible(waiting);
+            receive->setVisible(waiting);
+            choose->setVisible(waiting);
+            decline->setVisible(waiting);
+            cancelIn->setVisible(transfers.incoming() && !waiting);
+            cancelOut->setVisible(transfers.outgoing());
+            const auto path = QDir::toNativeSeparators(service.downloadDirectory());
+            directory->setText(path);
+            directory->setToolTip(path);
+            const bool canSend = service.enabled(Files) && !transfers.outgoing() && devices->currentIndex() >= 0;
+            outgoing->setAcceptDrops(canSend);
+            send->setEnabled(canSend);
+            folder->setEnabled(canSend);
+            retry->setVisible(!transfers.retryPaths().isEmpty());
+            retry->setEnabled(canSend);
+        };
+        QObject::connect(&service, &Service::changed, page, refresh);
+        QObject::connect(devices, &QComboBox::currentIndexChanged, page, refresh);
+        refresh();
+        if (!target.isEmpty() && send->isEnabled())
+            send->setFocus();
+        else if (service.transfers().awaitingDecision())
+            receive->setFocus();
+    }
+    layout->addWidget(feedback);
     layout->addStretch();
     scroll->setWidget(page);
-    return scroll;
-}
+    return stack ? static_cast<QWidget*>(stack) : scroll;
 }
 
-class Plugin final : public QObject, public HotaruNativePlugin, public HotaruNativePluginV2 {
+}
+
+class Plugin final : public QObject, public HotaruNativePlugin, public HotaruNativePluginV2, public HotaruLanPackage,
+                     public HotaruLanClipboardReceive {
     Q_OBJECT
-    Q_PLUGIN_METADATA(IID HOTARU_NATIVE_PLUGIN_IID FILE "plugin.json")
-    Q_INTERFACES(HotaruNativePlugin HotaruNativePluginV2)
+    Q_PLUGIN_METADATA(IID HOTARU_LAN_PACKAGE_IID FILE "published-plugin.json")
+    Q_INTERFACES(HotaruNativePlugin HotaruNativePluginV2 HotaruLanPackage HotaruLanClipboardReceive)
 public:
+    QString id() const override { return QLatin1String(kHotaruLanCoreId); }
+    int feature() const override { return 0; }
+    void setAvailableFeatures(int features) override { if (m_service) m_service->setAvailableFeatures(features); }
+    bool hasPendingFileOffer() const override
+    {
+        return m_service && m_service->enabled(Files) && m_service->transfers().awaitingDecision();
+    }
+    QWidget* createFeaturePage(const QString& id, const QByteArray& target, QWidget* parent) override
+    {
+        const auto feature = featureFor(id);
+        return m_service && (feature || id == QLatin1String(kHotaruLanCoreId))
+            ? pageFor(*m_service, feature, parent, target) : nullptr;
+    }
     bool start(const QString& dataDirectory) override
     {
         if (dataDirectory.isEmpty())
             return false;
         if (!m_service) {
             m_service = std::make_unique<Service>(dataDirectory);
+            connect(m_service.get(), &Service::clipboardReceived, this, [this](const QMimeData& mime) {
+                if (m_clipboardReceived)
+                    m_clipboardReceived(mime);
+            });
             connect(m_service.get(), &Service::incomingOffer, this, [this] {
                 if (m_notify)
                     m_notify(m_service->transfers().pendingSummary());
@@ -368,15 +636,25 @@ public:
         }
         return true;
     }
+    void setClipboardReceiveNotifier(std::function<void(const QMimeData&)> callback) override
+    {
+        m_clipboardReceived = std::move(callback);
+    }
+
     void stop() override
     {
         m_notify = {};
+        m_clipboardReceived = {};
         m_service.reset();
     }
     QString state(const QString& id) const override
     {
         const auto feature = featureFor(id);
-        if (!m_service || !feature)
+        if (!m_service)
+            return {};
+        if (id == QLatin1String(kHotaruLanCoreId))
+            return m_service->coreEnabled() ? QStringLiteral("连接已启用") : QStringLiteral("已关闭");
+        if (!feature)
             return {};
         if (!m_service->enabled(feature))
             return QStringLiteral("开发预览 · 已关闭");
@@ -391,8 +669,7 @@ public:
     }
     QWidget* createPage(const QString& id, QWidget* parent) override
     {
-        const auto feature = featureFor(id);
-        return m_service && feature ? pageFor(*m_service, feature, parent) : nullptr;
+        return createFeaturePage(id, {}, parent);
     }
     void setFileOfferNotifier(std::function<void(QString)> callback) override
     {
@@ -402,13 +679,15 @@ public:
     bool enabled(const QString& id) const override
     {
         const int feature = featureFor(id);
-        return m_service && feature && m_service->enabled(feature);
+        return m_service && (id == QLatin1String(kHotaruLanCoreId) ? m_service->coreEnabled()
+                                                                   : m_service->enabled(feature));
     }
 
     bool setEnabled(const QString& id, bool enabledValue, QString& error) override
     {
         const int feature = featureFor(id);
-        return m_service && feature && m_service->setEnabled(feature, enabledValue, error);
+        return m_service && (id == QLatin1String(kHotaruLanCoreId) ? m_service->setCoreEnabled(enabledValue, error)
+                                                                   : m_service->setEnabled(feature, enabledValue, error));
     }
 
     QVector<HotaruNativePeer> peers(int feature) const override
@@ -443,7 +722,7 @@ public:
 
     QString clipboardSearchAlias() const override
     {
-        return m_service ? m_service->clipboardSearchAlias() : QStringLiteral("jtb");
+        return m_service ? m_service->clipboardSearchAlias() : QString{};
     }
 
     bool setClipboardSearchAlias(const QString& alias, QString& error) override
@@ -465,6 +744,7 @@ public:
 private:
     std::unique_ptr<Service> m_service;
     std::function<void(QString)> m_notify;
+    std::function<void(const QMimeData&)> m_clipboardReceived;
     std::function<void()> m_changed;
     QMetaObject::Connection m_changedConnection;
 };

@@ -1,7 +1,6 @@
 param(
     [Parameter(Mandatory)][string]$BuildDirectory,
-    [Parameter(Mandatory)][string]$OutputFile,
-    [switch]$IncludeLanPreview
+    [Parameter(Mandatory)][string]$OutputFile
 )
 
 $ErrorActionPreference = 'Stop'
@@ -29,16 +28,6 @@ foreach ($required in @('HotaruDev.exe', 'ltoolcore.dll', 'Qt6Core.dll', 'platfo
 }
 if (Test-Path -LiteralPath (Join-Path $runtime 'Hotaru.exe')) {
     throw '构建目录混入了正式版，请使用独立的开发版构建目录。'
-}
-if ($IncludeLanPreview) {
-    if ('HOTARU_LAN_PREVIEW:BOOL=ON' -notin $cache) {
-        throw '局域网测试包需要使用 HOTARU_LAN_PREVIEW=ON 构建。'
-    }
-    foreach ($required in @('native-preview/HotaruLan.dll', 'native-preview/BoringSSL-LICENSE.txt')) {
-        if (!(Test-Path -LiteralPath (Join-Path $runtime $required) -PathType Leaf)) {
-            throw "缺少局域网预览文件：$required"
-        }
-    }
 }
 
 Add-Type -AssemblyName System.IO.Compression
@@ -68,14 +57,17 @@ try {
             }
         }
         foreach ($license in Get-ChildItem -LiteralPath (Join-Path $runtime 'licenses') -File -Filter '*.txt') {
+            if ($license.Name -ieq 'BoringSSL-LICENSE.txt') { continue }
             Add-DevEntry $license.FullName "licenses/$($license.Name)"
         }
         Add-DevEntry (Join-Path $project 'LICENSE') 'LICENSE'
         Add-DevEntry (Join-Path $project 'docs/development-testing.md') 'TESTING.md'
-        if ($IncludeLanPreview) {
-            foreach ($entry in @('native-preview/HotaruLan.dll', 'native-preview/BoringSSL-LICENSE.txt')) {
-                Add-DevEntry (Join-Path $runtime $entry) $entry
+        if ('HOTARU_LAN_PREVIEW:BOOL=ON' -in $cache) {
+            $lanBuild = Join-Path $runtime 'native-package-build'
+            foreach ($dll in @('HotaruLan.dll', 'lan-clipboard.dll', 'lan-files.dll')) {
+                Add-DevEntry (Join-Path $lanBuild $dll) "native-plugins-dev/$dll"
             }
+            Add-DevEntry (Join-Path $lanBuild 'BoringSSL-LICENSE.txt') 'licenses/BoringSSL-LICENSE.txt'
             Add-DevEntry (Join-Path $project 'docs/lan-preview-testing.md') 'LAN-TESTING.md'
         }
     } finally {

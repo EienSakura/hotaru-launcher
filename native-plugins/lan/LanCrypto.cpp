@@ -45,7 +45,7 @@ QByteArray makeProof(const Key& key)
 {
     QByteArray mac(kProofBytes, Qt::Uninitialized);
     unsigned int size = 0;
-    static constexpr auto label = "Hotaru LAN HL01 key confirmation";
+    static constexpr auto label = "Hotaru LAN HL02 key confirmation";
     if (!HMAC(EVP_sha256(), key.data(), key.size(), reinterpret_cast<const uint8_t*>(label),
               std::strlen(label),
               reinterpret_cast<uint8_t*>(mac.data()), &size) || size != kProofBytes)
@@ -102,7 +102,7 @@ bool SecureChannel::derive(QByteArrayView peerShare)
                                       material.size(), bytes(peerShare), peerShare.size());
     state->exchange.reset();
     const auto deriveKey = [&](Key& key, QByteArrayView label) {
-        static constexpr auto salt = "Hotaru LAN HL01 SPAKE2";
+        static constexpr auto salt = "Hotaru LAN HL02 SPAKE2";
         return HKDF(key.data(), key.size(), EVP_sha256(), material.data(), size, bytes(salt),
                     std::strlen(salt), bytes(label), label.size()) == 1;
     };

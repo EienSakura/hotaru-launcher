@@ -1,6 +1,10 @@
 #include "SettingsDialog.h"
+#include <QDesktopServices>
 #include "BuildChannel.h"
 #include "HotaruNativeHost.h"
+#include "HotaruPluginRepository.h"
+#include "PluginStore.h"
+#include "PluginHost.h"
 
 #include "ConfigPage.h"
 #include "SilentInstallLog.h"
@@ -10,13 +14,21 @@
 #include "Theme.h"
 #include "Utils.h"
 
+#include <QDialogButtonBox>
+#include <QDir>
 #include <QEvent>
+#include <QFileInfo>
 #include <QCheckBox>
+#include <QSpinBox>
+#include <QFormLayout>
+#include "ClipboardStore.h"
 #include <QFileDialog>
 #include <QFrame>
+#include <QGridLayout>
 #include <QLabel>
 #include <QMessageBox>
 #include <QPushButton>
+#include <QScrollArea>
 #include <QSignalBlocker>
 
 #include <QHash>
@@ -27,6 +39,7 @@
 #include <QPixmap>
 #include <QStackedWidget>
 #include <QTabWidget>
+#include <QTabBar>
 #include <QTimer>
 #include <QToolButton>
 #include <QVBoxLayout>
@@ -163,6 +176,41 @@ QPushButton#rowBtn {
 }
 QPushButton#rowBtn:disabled { background: transparent; border: 1px solid @line; color: @disabledLine; }
 /* 软件列表的表头：比正文淡、比说明文字重一点，好认但不抢 */
+QToolButton#pluginGroupToggle {
+    background: @field;
+    color: @text;
+    border: 1px solid @line;
+    border-radius: 8px;
+    padding: 6px 10px;
+    font-weight: 600;
+    text-align: left;
+}
+QToolButton#pluginGroupToggle:hover { background: @hover; }
+QToolButton#pluginGroupToggle:focus { border-color: @accent; }
+QFrame#pluginCard, QFrame#lanDetailCard {
+    background: @field; border: 1px solid @line; border-radius: 10px;
+}
+QLabel#lanDropHint {
+    background: @group; color: @muted; border: 1px dashed @border;
+    border-radius: 8px; padding: 6px 10px;
+}
+QLabel#hotaruNativeBadge {
+    background: @accent;
+    color: @onAccent;
+    border-radius: 5px;
+    padding: 2px 6px;
+    font-size: 8.5pt;
+    font-weight: 600;
+}
+QLabel#pluginVersionBadge {
+    background: @hover;
+    color: @text;
+    border: 1px solid @line;
+    border-radius: 5px;
+    padding: 1px 6px;
+    font-size: 8.5pt;
+    font-weight: 600;
+}
 QLabel#colHead { color: @muted; font-size: 8.5pt; font-weight: 600; background: transparent; }
 
 QCheckBox { color: @text; spacing: 8px; background: transparent; }
@@ -373,136 +421,511 @@ void SettingsDialog::ensurePage(int index)
 QWidget* SettingsDialog::buildPluginHome()
 {
     m_pluginStack = new QStackedWidget(this);
-    auto* home = new QWidget(m_pluginStack);
+    buildPluginPage(m_pluginStack);
+    return m_pluginStack;
+}
+
+void SettingsDialog::openPluginRepository()
+{
+    auto* dialog = new QDialog(this, Qt::Dialog | Qt::WindowCloseButtonHint);
+    dialog->setObjectName(QStringLiteral("pluginRepositoryDialog"));
+    // 子窗口不能沿用设置页对子控件的透明底色。
+    Theme::bind(dialog, R"QSS(
+        QDialog#pluginRepositoryDialog,
+        QScrollArea#pluginRepositoryScroll,
+        QScrollArea#pluginRepositoryScroll > QWidget#qt_scrollarea_viewport,
+        QWidget#pluginRepositoryGroups { background: @window; }
+    )QSS");
+    dialog->setWindowTitle(QStringLiteral("Hotaru 官方插件仓库"));
+    dialog->setAttribute(Qt::WA_DeleteOnClose);
+    dialog->resize(820, 610);
+
+    auto* client = new HotaruPluginRepository::Client(dialog);
+    auto* layout = new QVBoxLayout(dialog);
+    layout->setContentsMargins(0, 0, 0, 16);
+    layout->addWidget(buildPluginPage(dialog, client), 1);
+
+    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Close, dialog);
+    buttons->button(QDialogButtonBox::Close)->setText(QStringLiteral("关闭"));
+    layout->addWidget(buttons, 0, Qt::AlignHCenter);
+    connect(buttons, &QDialogButtonBox::rejected, dialog, &QDialog::reject);
+    connect(dialog, &QDialog::finished, client, [client] {
+        if (client->busy()) client->cancel();
+    });
+    dialog->open();
+    client->refresh();
+}
+
+QWidget* SettingsDialog::buildPluginPage(QWidget* parent, HotaruPluginRepository::Client* client)
+{
+    auto* home = new QWidget(parent);
     auto* layout = new QVBoxLayout(home);
     layout->setContentsMargins(28, 24, 28, 24);
     layout->setSpacing(16);
 
     auto* header = new QHBoxLayout;
-    auto* title = new QLabel(QStringLiteral("Hotaru插件"), home);
+    auto* title = new QLabel(client ? QStringLiteral("官方插件仓库") : QStringLiteral("Hotaru插件"), home);
     title->setObjectName(QStringLiteral("pageTitle"));
     QFont titleFont = title->font();
     titleFont.setPointSizeF(titleFont.pointSizeF() + 5);
     titleFont.setBold(true);
     title->setFont(titleFont);
     header->addWidget(title, 1);
-    auto* importButton = new QPushButton(QStringLiteral("导入第三方插件"), home);
-    auto* compatibility = new QPushButton(QStringLiteral("ltool 兼容插件"), home);
-    header->addWidget(importButton);
-    header->addWidget(compatibility);
+    QPushButton* refreshCatalog = nullptr;
+    QPushButton* cancelDownload = nullptr;
+    QPushButton* manualDownload = nullptr;
+    if (client) {
+        manualDownload = new QPushButton(QStringLiteral("手动下载插件"), home);
+        manualDownload->setObjectName(QStringLiteral("pluginManualDownload"));
+        manualDownload->setToolTip(QStringLiteral("在 GitHub 下载 ZIP，再回到插件页选择「导入本地插件」。"));
+        header->addWidget(manualDownload);
+        connect(manualDownload, &QPushButton::clicked, home, [] {
+            QDesktopServices::openUrl(QUrl(QStringLiteral("https://github.com/EienSakura/Hotaru-Plugins#readme")));
+        });
+        refreshCatalog = new QPushButton(QStringLiteral("刷新目录"), home);
+        cancelDownload = new QPushButton(QStringLiteral("取消"), home);
+        header->addWidget(refreshCatalog);
+        header->addWidget(cancelDownload);
+        connect(refreshCatalog, &QPushButton::clicked, client, [client] { client->refresh(true); });
+        connect(cancelDownload, &QPushButton::clicked, client, &HotaruPluginRepository::Client::cancel);
+    } else {
+        auto* repository = new QPushButton(QStringLiteral("官方仓库"), home);
+        repository->setObjectName(QStringLiteral("openPluginRepository"));
+        auto* importButton = new QPushButton(QStringLiteral("导入本地插件"), home);
+        auto* compatibility = new QPushButton(QStringLiteral("ltool 兼容插件"), home);
+        header->addWidget(repository);
+        header->addWidget(importButton);
+        header->addWidget(compatibility);
+        connect(repository, &QPushButton::clicked, this, &SettingsDialog::openPluginRepository);
+        connect(compatibility, &QPushButton::clicked, this, [this] { openCompatibilityPlugins(); });
+        connect(importButton, &QPushButton::clicked, home, [this] {
+            const QString path = QFileDialog::getOpenFileName(this, QStringLiteral("导入本地插件"), QString(), QStringLiteral("插件包 (*.dll *.zip)"));
+            if (path.isEmpty()) return;
+            QString error;
+            const auto confirm = [this](const QString& message) {
+                QMessageBox box(QMessageBox::Question, QStringLiteral("确认替换插件"), message,
+                    QMessageBox::Ok | QMessageBox::Cancel, this);
+                box.setTextFormat(Qt::PlainText);
+                box.setDefaultButton(QMessageBox::Cancel);
+                return box.exec() == QMessageBox::Ok;
+            };
+            if (!HotaruNativeHost::importPackage(path, error, confirm)) {
+                if (!error.isEmpty()) QMessageBox::warning(this, QStringLiteral("导入失败"), error);
+            } else {
+                QMessageBox::information(this, QStringLiteral("导入完成"),
+                    QStringLiteral("插件已导入。重启 Hotaru 后可管理新版本。"));
+            }
+        });
+    }
     layout->addLayout(header);
 
-    auto* hint = new QLabel(QStringLiteral("直属插件独立运行，导入的第三方插件默认关闭。"), home);
+    auto* hint = new QLabel(home);
+    hint->setTextFormat(Qt::PlainText);
     hint->setObjectName(QStringLiteral("muted"));
     hint->setWordWrap(true);
     layout->addWidget(hint);
 
-    auto* grid = new QGridLayout;
-    grid->setContentsMargins(0, 4, 0, 0);
-    grid->setHorizontalSpacing(10);
-    grid->setVerticalSpacing(10);
-    grid->setAlignment(Qt::AlignTop);
-    layout->addLayout(grid);
+    auto* tabs = new QTabBar(home);
+    tabs->setObjectName(QStringLiteral("pluginCategoryTabs"));
+    tabs->setExpanding(false);
+    tabs->addTab(QStringLiteral("全部"));
+    tabs->addTab(QStringLiteral("基础服务"));
+    tabs->addTab(QStringLiteral("功能插件"));
+    layout->addWidget(tabs, 0, Qt::AlignLeft);
 
-    struct CardWidgets {
-        QLabel* status = nullptr;
-        QCheckBox* enabled = nullptr;
-        QPushButton* settings = nullptr;
+    struct PluginGroup {
+        QWidget* section;
+        QToolButton* toggle;
+        QWidget* content;
+        QGridLayout* grid;
     };
-    QHash<QString, CardWidgets> cards;
-    const auto makeCard = [this, home, grid, &cards](const QString& id, int row, int column) {
-        auto* card = new QFrame(home);
+    QWidget* groupsHost = home;
+    auto* groupsLayout = layout;
+    if (client) {
+        auto* scroll = new QScrollArea(home);
+        scroll->setObjectName(QStringLiteral("pluginRepositoryScroll"));
+        scroll->setFrameShape(QFrame::NoFrame);
+        scroll->setWidgetResizable(true);
+        groupsHost = new QWidget(scroll);
+        groupsHost->setObjectName(QStringLiteral("pluginRepositoryGroups"));
+        groupsLayout = new QVBoxLayout(groupsHost);
+        groupsLayout->setContentsMargins(0, 0, 0, 0);
+        groupsLayout->setSpacing(layout->spacing());
+        scroll->setWidget(groupsHost);
+        layout->addWidget(scroll, 1);
+    }
+    const auto makeGroup = [groupsHost, groupsLayout, tabs](int tab) {
+        auto* section = new QWidget(groupsHost);
+        auto* sectionLayout = new QVBoxLayout(section);
+        sectionLayout->setContentsMargins(0, 0, 0, 0);
+        sectionLayout->setSpacing(8);
+        groupsLayout->addWidget(section);
+
+        auto* toggle = new QToolButton(section);
+        toggle->setObjectName(QStringLiteral("pluginGroupToggle"));
+        toggle->setText(tabs->tabText(tab));
+        toggle->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+        toggle->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+        toggle->setCheckable(true);
+        toggle->setChecked(true);
+        toggle->setArrowType(Qt::DownArrow);
+        sectionLayout->addWidget(toggle);
+
+        auto* content = new QWidget(section);
+        auto* grid = new QGridLayout(content);
+        grid->setContentsMargins(0, 0, 0, 0);
+        grid->setSpacing(10);
+        grid->setColumnStretch(0, 1);
+        grid->setColumnStretch(1, 1);
+        sectionLayout->addWidget(content);
+        return PluginGroup{section, toggle, content, grid};
+    };
+    const auto services = makeGroup(1);
+    const auto features = makeGroup(2);
+
+    const auto makeCard = [this, client, parent](const HotaruNativeHost::PluginInfo& info, QWidget* parent,
+                                         const HotaruPluginRepository::Entry* offered = nullptr) {
+        namespace Repo = HotaruPluginRepository;
+        const auto id = info.id;
+        auto* card = new QFrame(parent);
         card->setObjectName(QStringLiteral("pluginCard"));
-        card->setFrameShape(QFrame::StyledPanel);
         card->setFocusPolicy(Qt::StrongFocus);
         auto* body = new QVBoxLayout(card);
         body->setContentsMargins(12, 10, 12, 10);
         body->setSpacing(5);
         card->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Maximum);
 
-        const auto infos = HotaruNativeHost::plugins();
-        HotaruNativeHost::PluginInfo info;
-        for (const auto& candidate : infos)
-            if (candidate.id == id) { info = candidate; break; }
         auto* heading = new QHBoxLayout;
         auto* name = new QLabel(info.name, card);
+        name->setTextFormat(Qt::PlainText);
+        name->setWordWrap(true);
         QFont nameFont = name->font(); nameFont.setBold(true); nameFont.setPointSizeF(nameFont.pointSizeF() + 1); name->setFont(nameFont);
-        heading->addWidget(name, 1);
+        heading->addWidget(name, 0, Qt::AlignVCenter);
+        if (!info.version.isEmpty()) {
+            auto* version = new QLabel(info.version, card);
+            version->setTextFormat(Qt::PlainText);
+            version->setObjectName(QStringLiteral("pluginVersionBadge"));
+            heading->addWidget(version, 0, Qt::AlignVCenter);
+        }
+        if (offered || info.verified || info.source == "bundled") {
+            auto* badge = new QLabel(QStringLiteral("Hotaru直属"), card);
+            badge->setObjectName(QStringLiteral("hotaruNativeBadge"));
+            heading->addWidget(badge, 0, Qt::AlignVCenter);
+        }
+        heading->addStretch();
+        body->addLayout(heading);
         auto* status = new QLabel(card);
         status->setObjectName(QStringLiteral("pluginStatus"));
-        heading->addWidget(status, 0, Qt::AlignRight | Qt::AlignTop);
-        body->addLayout(heading);
+        status->setTextFormat(Qt::PlainText);
+        status->setWordWrap(true);
         auto* description = new QLabel(info.description, card);
+        description->setTextFormat(Qt::PlainText);
         description->setObjectName(QStringLiteral("muted"));
         description->setWordWrap(true);
         body->addWidget(description);
-        auto* version = new QLabel(info.version.isEmpty() ? QStringLiteral("Hotaru直属插件") : info.version, card);
-        version->setObjectName(QStringLiteral("muted"));
-        body->addWidget(version);
+        body->addWidget(status);
+        body->addStretch();
         auto* actions = new QHBoxLayout;
-        auto* enabled = new QCheckBox(QStringLiteral("启用"), card);
-        auto* settings = new QPushButton(QStringLiteral("打开设置"), card);
-        actions->addWidget(enabled);
-        actions->addStretch();
-        actions->addWidget(settings);
-        body->addLayout(actions);
-        grid->addWidget(card, row, column);
-        cards.insert(id, {status, enabled, settings});
-
-        const auto refresh = [id, status, enabled, settings] {
-            HotaruNativeHost::PluginInfo current;
-            for (const auto& candidate : HotaruNativeHost::plugins())
-                if (candidate.id == id) { current = candidate; break; }
-            status->setText(current.state.isEmpty() ? QStringLiteral("未安装") : current.state);
-            const QSignalBlocker blocker(enabled);
-            enabled->setChecked(current.enabled);
-            enabled->setEnabled(current.installed);
-            settings->setEnabled(current.installed);
-            status->setToolTip(current.verified ? QStringLiteral("已验证") : QStringLiteral("开发预览 / 未验证"));
-        };
-        refresh();
-        HotaruNativeHost::subscribeChanged(card, refresh);
-        connect(enabled, &QCheckBox::toggled, card, [id, enabled, refresh](bool on) {
-            if (!enabled->isEnabled()) return;
-            QString error;
-            if (!HotaruNativeHost::setEnabled(id, on, error)) {
-                enabled->blockSignals(true); refresh(); enabled->blockSignals(false);
-                QMessageBox::warning(enabled, QStringLiteral("插件设置"), error);
-            }
-        });
-        connect(settings, &QPushButton::clicked, this, [this, id] {
-            auto* panel = new QWidget(m_pluginStack);
-            auto* page = HotaruNativeHost::createPage(id, panel);
-            if (!page) { delete panel; return; }
-            auto* stackLayout = new QVBoxLayout(panel);
-            auto* back = new QPushButton(QStringLiteral("返回插件首页"), panel);
-            stackLayout->addWidget(back, 0, Qt::AlignLeft);
-            stackLayout->addWidget(page, 1);
-            connect(back, &QPushButton::clicked, this, [this, panel] {
-                m_pluginStack->setCurrentIndex(0);
-                m_pluginStack->removeWidget(panel);
-                panel->deleteLater();
+        if (offered) {
+            const auto entry = *offered;
+            status->setText(info.preview ? QStringLiteral("来源已验证 · 开发预览") : QStringLiteral("来源已验证"));
+            auto* action = new QPushButton(info.installed ? QStringLiteral("更新／替换") : QStringLiteral("安装"), card);
+            actions->addStretch();
+            actions->addWidget(action);
+            body->addLayout(actions);
+            const auto current = Repo::desired().value(id);
+            const bool same = current.source == "official" && Repo::sameVersion(current.entry.version, entry.version);
+            action->setEnabled(!same && !client->busy() && client->catalog().expires > QDateTime::currentDateTimeUtc());
+            if (same) action->setText(QStringLiteral("已安装"));
+            auto* dialog = parent;
+            connect(action, &QPushButton::clicked, dialog, [dialog, id, client] {
+                Repo::InstallPlan plan;
+                const auto catalog = client->catalog();
+                QString error;
+                const auto inventory = Repo::desired();
+                QStringList bundled;
+                for (const auto& item : HotaruNativeHost::plugins())
+                    if (item.source == "bundled") bundled << item.id;
+                if (!Repo::planInstall(id, catalog, inventory, BuildChannel::development, plan, error, bundled)) {
+                    QMessageBox::warning(dialog, QStringLiteral("无法安装"), error);
+                    return;
+                }
+                QStringList lines;
+                for (const auto& e : plan.downloads) {
+                    const auto old = inventory.value(e.id);
+                    QString installedFrom;
+                    if (!old.source.isEmpty())
+                        installedFrom = old.entry.version + (old.source == "official" ? QStringLiteral("（官方仓库）") : QStringLiteral("（本地导入）"));
+                    else
+                        for (const auto& info : HotaruNativeHost::plugins())
+                            if (info.id == e.id && info.source == "bundled") installedFrom = QStringLiteral("开发预装");
+                    lines << (installedFrom.isEmpty() ? QStringLiteral("%1 %2").arg(e.name, e.version)
+                        : QStringLiteral("%1：%2 → %3（官方仓库）").arg(e.name, installedFrom, e.version));
+                }
+                QMessageBox box(QMessageBox::Question, QStringLiteral("确认安装插件"),
+                    lines.join(QLatin1Char('\n')) + QStringLiteral("\n下载大小：") + PluginStore::humanSize(plan.totalBytes),
+                    QMessageBox::Ok | QMessageBox::Cancel, dialog);
+                box.setTextFormat(Qt::PlainText);
+                box.setDefaultButton(QMessageBox::Cancel);
+                if (box.exec() == QMessageBox::Ok) client->install(plan, true);
             });
-            m_pluginStack->addWidget(panel);
-            m_pluginStack->setCurrentWidget(panel);
-        });
+        } else {
+            auto* enabled = new QCheckBox(QStringLiteral("启用"), card);
+            auto* settings = new QPushButton(QStringLiteral("打开设置"), card);
+            auto* remove = new QPushButton(QStringLiteral("卸载"), card);
+            actions->addWidget(enabled);
+            actions->addStretch();
+            actions->addWidget(settings);
+            if (info.removable) actions->addWidget(remove);
+            else remove->hide();
+            body->addLayout(actions);
+            const auto refresh = [id, status, enabled, settings, remove] {
+                HotaruNativeHost::PluginInfo current;
+                for (const auto& candidate : HotaruNativeHost::plugins())
+                    if (candidate.id == id) { current = candidate; break; }
+                auto label = current.state.isEmpty() ? QStringLiteral("未安装") : current.state;
+                if (current.source == "local") label += QStringLiteral(" · 本地导入");
+                else if (current.source == "official") label += QStringLiteral(" · 来源已验证");
+                if (current.preview && current.installed) label += QStringLiteral(" · 开发预览");
+                status->setText(label);
+                const QSignalBlocker blocker(enabled);
+                enabled->setChecked(current.enabled);
+                enabled->setEnabled(current.loaded && !current.pending && current.dependencyReady);
+                const bool needs = !current.dependency.isEmpty() && !current.dependencyReady;
+                settings->setText(needs ? QStringLiteral("打开前置设置") : QStringLiteral("打开设置"));
+                settings->setEnabled(!current.pending && (needs ? !HotaruNativeHost::state(current.dependency).isEmpty()
+                    : current.loaded && (current.enabled || id == kHotaruLanCoreId || id == kHotaruLanClipboardId || id == kHotaruLanFilesId)));
+                remove->setEnabled(current.installed && current.state != QStringLiteral("待卸载"));
+            };
+            refresh();
+            HotaruNativeHost::subscribeChanged(card, refresh);
+            connect(enabled, &QCheckBox::toggled, card, [this, id, enabled, refresh](bool on) {
+                QString error;
+                if (!HotaruNativeHost::setEnabled(id, on, error)) {
+                    refresh();
+                    QMessageBox::warning(this, QStringLiteral("插件设置"), error);
+                }
+            });
+            connect(settings, &QPushButton::clicked, this, [this, id, dependency = info.dependency] {
+                openNativePlugin(!dependency.isEmpty() && !HotaruNativeHost::enabled(dependency) ? dependency : id);
+            });
+            connect(remove, &QPushButton::clicked, this, [this, id] {
+                QStringList affected;
+                QString error;
+                if (!HotaruNativeHost::uninstall(id, affected, false, error)) {
+                    QMessageBox::warning(this, QStringLiteral("无法卸载"), error); return;
+                }
+                const auto choice = QMessageBox::question(this, QStringLiteral("卸载插件"),
+                    QStringLiteral("以下插件将卸载，重启后完成：\n") + affected.join(QLatin1Char('\n')),
+                    QMessageBox::Ok | QMessageBox::Cancel, QMessageBox::Cancel);
+                if (choice == QMessageBox::Ok && !HotaruNativeHost::uninstall(id, affected, true, error))
+                    QMessageBox::warning(this, QStringLiteral("无法卸载"), error);
+            });
+        }
+        return card;
     };
-    makeCard(QStringLiteral("lan-clipboard"), 0, 0);
-    makeCard(QStringLiteral("lan-files"), 0, 1);
+    const auto makeCompatibilityCard = [this](const PluginStore::Row& row, QWidget* parent) {
+        auto* card = new QFrame(parent);
+        card->setObjectName(QStringLiteral("pluginCard"));
+        card->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Maximum);
+        auto* body = new QVBoxLayout(card);
+        body->setContentsMargins(12, 10, 12, 10);
+        auto* title = new QLabel(row.remote.name, card);
+        title->setTextFormat(Qt::PlainText);
+        title->setWordWrap(true);
+        body->addWidget(title);
+        const auto file = row.remote.file;
+        const bool staged = QFileInfo::exists(QDir(PluginHost::pluginsDir()).filePath(file + ".hotaru-local-stage"))
+            || QFileInfo::exists(QDir(PluginHost::pluginsDir()).filePath(file + ".off.hotaru-local-stage"));
+        const auto label = row.queuedRemove ? QStringLiteral("待卸载")
+            : staged ? QStringLiteral("待重启") : PluginStore::stateWord(row.state);
+        auto* status = new QLabel(QStringLiteral("ltool 兼容插件 · %1").arg(label), card);
+        status->setTextFormat(Qt::PlainText);
+        body->addWidget(status);
+        auto* actions = new QHBoxLayout;
+        actions->addStretch();
+        auto* manage = new QPushButton(QStringLiteral("打开兼容管理"), card);
+        actions->addWidget(manage);
+        body->addLayout(actions);
+        connect(manage, &QPushButton::clicked, this, [this] { openCompatibilityPlugins(); });
+        return card;
+    };
+    const auto bindGroup = [home, tabs](const PluginGroup& group, int category) {
+        const auto update = [group, category](int tab) {
+            const bool showAll = tab == 0;
+            group.section->setVisible(showAll || tab == category);
+            group.toggle->setVisible(showAll);
+            group.content->setVisible(!showAll || group.toggle->isChecked());
+        };
+        connect(tabs, &QTabBar::currentChanged, home, update);
+        connect(group.toggle, &QToolButton::toggled, home, [group, tabs, update](bool expanded) {
+            group.toggle->setArrowType(expanded ? Qt::DownArrow : Qt::RightArrow);
+            update(tabs->currentIndex());
+        });
+        update(tabs->currentIndex());
+    };
+    bindGroup(services, 1);
+    bindGroup(features, 2);
 
-    connect(compatibility, &QPushButton::clicked, this, [this] { openCompatibilityPlugins(); });
-    connect(importButton, &QPushButton::clicked, this, [this] {
-        const QString path = QFileDialog::getOpenFileName(this, QStringLiteral("导入第三方插件"), QString(), QStringLiteral("插件包 (*.dll *.zip)"));
-        if (path.isEmpty()) return;
-        QString error;
-        if (!HotaruNativeHost::importPackage(path, error))
-            QMessageBox::warning(this, QStringLiteral("导入失败"), error);
-        else
-            QMessageBox::information(this, QStringLiteral("导入完成"), QStringLiteral("插件已导入，默认处于关闭状态。"));
+    const auto rebuild = [=] {
+        namespace Repo = HotaruPluginRepository;
+        const auto clear = [](QGridLayout* grid) {
+            while (auto* item = grid->takeAt(0)) {
+                if (auto* w = item->widget()) { w->hide(); w->deleteLater(); }
+                delete item;
+            }
+        };
+        clear(services.grid);
+        clear(features.grid);
+        const auto append = [&](const HotaruNativeHost::PluginInfo& info, const Repo::Entry* e = nullptr) {
+            const auto& group = (info.category == "service" ||
+                (info.category.isEmpty() && info.dependency.isEmpty())) ? services : features;
+            const int i = group.grid->count();
+            group.grid->addWidget(makeCard(info, group.content, e), i / 2, i % 2);
+        };
+        const auto local = HotaruNativeHost::plugins();
+        int count = 0;
+        if (client) {
+            const auto catalog = client->catalog();
+            for (const auto& e : Repo::available(catalog, BuildChannel::development)) {
+                HotaruNativeHost::PluginInfo info;
+                info.id = e.id; info.name = e.name; info.description = e.description;
+                info.version = e.version; info.category = e.category; info.preview = e.channel == "preview";
+                for (const auto& installed : local)
+                    if (installed.id == e.id) info.installed = installed.installed;
+                append(info, &e);
+                ++count;
+            }
+        } else {
+            for (const auto& info : local)
+                if (info.installed) { append(info); ++count; }
+            for (const auto& row : PluginStore::localRows()) {
+                const auto i = features.grid->count();
+                features.grid->addWidget(makeCompatibilityCard(row, features.content), i / 2, i % 2);
+                ++count;
+            }
+        }
+        if (client) {
+            refreshCatalog->setEnabled(!client->busy());
+            cancelDownload->setVisible(client->busy());
+        }
+        const auto status = client ? client->status() : Repo::activationError();
+        const auto empty = client ? QStringLiteral("暂无可安装插件") : QStringLiteral("暂无已安装插件");
+        auto message = count ? status : status.isEmpty() ? empty : empty + QStringLiteral(" · ") + status;
+        if (client) {
+            const auto catalog = client->catalog();
+            const bool unavailable = !client->busy()
+                && (catalog.sequence <= 0 || catalog.expires <= QDateTime::currentDateTimeUtc());
+            manualDownload->setVisible(unavailable);
+            if (unavailable)
+                message += QStringLiteral("\n暂无有效目录。可手动下载 ZIP，再到插件页选择「导入本地插件」。");
+        }
+        hint->setText(message);
+        hint->setVisible(!message.isEmpty());
+        services.toggle->setEnabled(services.grid->count() > 0);
+        features.toggle->setEnabled(features.grid->count() > 0);
+    };
+    if (client) {
+        connect(client, &HotaruPluginRepository::Client::changed, home, rebuild);
+        connect(client, &HotaruPluginRepository::Client::installed, home, [] { HotaruNativeHost::inventoryChanged(); });
+        connect(client, &HotaruPluginRepository::Client::progress, hint, [hint](qint64 bytes, qint64 total) {
+            hint->setText(QStringLiteral("正在下载：%1 / %2")
+                .arg(PluginStore::humanSize(bytes), PluginStore::humanSize(total)));
+        });
+    } else {
+        m_pluginStack->addWidget(home);
+        connect(m_pluginStack, &QStackedWidget::currentChanged, home, [rebuild](int i) { if (!i) rebuild(); });
+        HotaruNativeHost::subscribeInventory(home, rebuild);
+    }
+    groupsLayout->addStretch();
+    rebuild();
+    return home;
+}
+
+bool SettingsDialog::openNativePlugin(const QString& id, const QByteArray& target)
+{
+    openAt(1);
+    ensurePage(1);
+    auto* panel = new QWidget(m_pluginStack);
+    auto* page = HotaruNativeHost::createPage(id, panel, target);
+    if (!page) {
+        delete panel;
+        return false;
+    }
+    if (auto* previous = m_pluginStack->currentWidget(); previous && previous != m_pluginStack->widget(0) &&
+        (!m_toolsPage || previous != m_toolsPage->parentWidget())) {
+        m_pluginStack->removeWidget(previous);
+        previous->deleteLater();
+    }
+    auto* layout = new QVBoxLayout(panel);
+    auto* back = new QPushButton(QStringLiteral("返回插件首页"), panel);
+    layout->addWidget(back, 0, Qt::AlignLeft);
+    layout->addWidget(page, 1);
+    if (id == QLatin1String(kHotaruLanClipboardId)) {
+        auto& store = ClipboardStore::instance();
+        store.start();
+        QWidget* history = nullptr;
+        for (auto* frame : page->findChildren<QFrame*>()) {
+            if (frame->property("hotaruClipboardHistorySlot").toBool() && qobject_cast<QVBoxLayout*>(frame->layout())) {
+                history = frame;
+                break;
+            }
+        }
+        if (!history) {
+            // 旧前置包没有预留历史栏；宿主仍按左右分栏显示。
+            layout->removeWidget(page);
+            auto* columns = new QHBoxLayout;
+            columns->setSpacing(12);
+            columns->addWidget(page, 1);
+            history = new QFrame(panel);
+            history->setObjectName(QStringLiteral("lanDetailCard"));
+            auto* fallback = new QVBoxLayout(history);
+            fallback->setContentsMargins(14, 12, 14, 12);
+            fallback->addWidget(new QLabel(QStringLiteral("本机记录"), history));
+            columns->addWidget(history, 1);
+            layout->addLayout(columns, 1);
+        }
+        auto* form = qobject_cast<QVBoxLayout*>(history->layout());
+        auto* record = new QCheckBox(QStringLiteral("在本机保留剪贴板历史"), history);
+        record->setChecked(store.enabled());
+        form->addWidget(record);
+        auto* description = new QLabel(QStringLiteral("保存本机复制和从局域网收到的文本、图片。关闭记录后，仍能查看当前内容。"), history);
+        description->setObjectName(QStringLiteral("muted"));
+        description->setWordWrap(true);
+        form->addWidget(description);
+        auto* days = new QSpinBox(history);
+        days->setRange(0, 3650);
+        days->setSpecialValueText(QStringLiteral("不限天数"));
+        days->setSuffix(QStringLiteral(" 天"));
+        days->setValue(store.keepDays());
+        auto* retention = new QHBoxLayout;
+        auto* daysLabel = new QLabel(QStringLiteral("保留天数（最多 200 条）"), history);
+        daysLabel->setWordWrap(true);
+        daysLabel->setBuddy(days);
+        retention->addWidget(daysLabel);
+        retention->addWidget(days);
+        retention->addStretch();
+        form->addLayout(retention);
+        auto* clear = new QPushButton(QStringLiteral("清空剪贴板历史"), history);
+        form->addWidget(clear, 0, Qt::AlignLeft);
+        form->addStretch();
+        connect(record, &QCheckBox::toggled, history, [&store](bool on) { store.setEnabled(on); });
+        connect(days, qOverload<int>(&QSpinBox::valueChanged), history, [&store](int value) { store.setKeepDays(value); });
+        connect(clear, &QPushButton::clicked, history, [history, &store] {
+            if (QMessageBox::question(history, QStringLiteral("清空历史"),
+                QStringLiteral("删除本机保存的剪贴板记录和图片？"),
+                QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel) == QMessageBox::Yes)
+                store.clear();
+        });
+    }
+    connect(back, &QPushButton::clicked, this, [this, panel] {
+        m_pluginStack->setCurrentIndex(0);
+        m_pluginStack->removeWidget(panel);
+        panel->deleteLater();
     });
-    layout->addStretch();
-    m_pluginStack->addWidget(home);
-    return m_pluginStack;
+    m_pluginStack->addWidget(panel);
+    m_pluginStack->setCurrentWidget(panel);
+    return true;
 }
 ToolsPage* SettingsDialog::openCompatibilityPlugins()
 {

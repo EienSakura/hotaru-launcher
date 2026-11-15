@@ -6,13 +6,14 @@ namespace HotaruLan {
 namespace {
 constexpr int kHelloBytes = 4 + 2 * kIdentityBytes + kShareBytes;
 constexpr int kQueueBudget = 2 * kMaxPlaintext;
+const QByteArray kInvitationWire("HL2I");
 }
 
 Peer::Peer(QTcpSocket* socket, QByteArray ownId, QByteArray expectedId, QByteArray passcode,
-           QObject* parent)
+           QObject* parent, bool invite, std::function<QByteArray(const QByteArray&, bool)> credential)
     : QObject(parent), m_socket(socket), m_ownId(std::move(ownId)),
       m_initiatedLocally(!expectedId.isEmpty()), m_peerId(std::move(expectedId)), m_passcode(std::move(passcode)),
-      m_step(m_initiatedLocally ? Connecting : ExpectInitiator)
+      m_invite(invite), m_credential(std::move(credential)), m_step(m_initiatedLocally ? Connecting : ExpectInitiator)
 {
     m_socket->setParent(this);
     m_socket->setReadBufferSize(kMaxPlaintext + kTagBytes + 4);
@@ -42,13 +43,14 @@ void Peer::begin()
     if (m_step != Connecting)
         return;
     m_socket->setSocketOption(QAbstractSocket::LowDelayOption, 1);
-    m_channel = std::make_unique<SecureChannel>(true, m_ownId, m_peerId, m_passcode);
+    const auto secret = m_invite ? QByteArrayLiteral("invite:") + m_passcode : m_passcode;
+    m_channel = std::make_unique<SecureChannel>(true, m_ownId, m_peerId, secret);
     m_passcode.fill(0);
     m_passcode.clear();
     m_step = ExpectResponder;
     const auto share = m_channel->share();
     if (share.size() != kShareBytes ||
-        !writeFrame(QByteArray(kWireVersion) + m_ownId + m_peerId + share))
+        !writeFrame((m_invite ? kInvitationWire : QByteArray(kWireVersion)) + m_ownId + m_peerId + share))
         finish(true);
 }
 
@@ -116,7 +118,10 @@ bool Peer::process(QByteArrayView frame)
         if (!m_channel->confirm(frame))
             return false;
     } else {
-        if (frame.first(4) != QByteArrayView(kWireVersion) ||
+        if (m_step == ExpectInitiator)
+            m_invite = frame.first(4) == QByteArrayView(kInvitationWire);
+        const auto wire = m_invite ? kInvitationWire : QByteArray(kWireVersion);
+        if (frame.first(4) != QByteArrayView(wire) ||
             frame.sliced(4 + kIdentityBytes, kIdentityBytes) != QByteArrayView(m_ownId))
             return false;
         const auto remote = frame.sliced(4, kIdentityBytes).toByteArray();
@@ -125,7 +130,13 @@ bool Peer::process(QByteArrayView frame)
             if (remote == m_ownId)
                 return false;
             m_peerId = remote;
-            m_channel = std::make_unique<SecureChannel>(false, m_ownId, m_peerId, m_passcode);
+            if (m_credential)
+                m_passcode = m_credential(remote, m_invite);
+            if (m_passcode.isEmpty())
+                return false;
+            m_usedInvitation = m_invite;
+            const auto secret = m_invite ? QByteArrayLiteral("invite:") + m_passcode : m_passcode;
+            m_channel = std::make_unique<SecureChannel>(false, m_ownId, m_peerId, secret);
             m_passcode.fill(0);
             m_passcode.clear();
             if (!m_channel->derive(share))
@@ -133,7 +144,7 @@ bool Peer::process(QByteArrayView frame)
             const auto proof = m_channel->proof();
             m_step = ExpectProof;
             return proof.size() == kProofBytes &&
-                   writeFrame(QByteArray(kWireVersion) + m_ownId + m_peerId +
+                   writeFrame(wire + m_ownId + m_peerId +
                               m_channel->share() + proof);
         }
         if (remote != m_peerId || !m_channel->derive(share) ||
