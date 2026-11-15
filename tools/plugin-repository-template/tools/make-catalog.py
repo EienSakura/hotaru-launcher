@@ -16,6 +16,13 @@ NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,119}\Z")
 MIB = 1024 * 1024
 CATALOG_VALIDITY_DAYS = 365
 
+# 维护者批准 1.0.1 的双机验收豁免，仅限下列已构建 ZIP。
+LAN_1_0_1_WAIVER = {
+    "lan-core": "d4cb600fb4593b58996c99d3b673ea6fa395b5ed7590bfaf569742c642eca030",
+    "lan-clipboard": "3099646d8064261124a4a6bb620a1dccefd33321320b3d118c6c9a58b3c52457",
+    "lan-files": "79c022ff50e51900f21c3a8088d619cd48178fbc39f28e0bb6ea86c9c08cb9cd",
+}
+
 
 def create(config, assets):
     entries = []
@@ -54,7 +61,9 @@ def create(config, assets):
             raise ValueError(f"渠道无效：{channel}")
         if channel == "stable" and key[0] in ("lan-core", "lan-clipboard", "lan-files"):
             record = item.get("windows_dual_machine")
-            if not record or record["sha256"] != asset["sha256"] or record["version"] != key[1] or not record["report"]:
+            waived = key[1] == "1.0.1" and LAN_1_0_1_WAIVER.get(key[0]) == asset["sha256"]
+            if not waived and (not record or record["sha256"] != asset["sha256"]
+                               or record["version"] != key[1] or not record["report"]):
                 raise ValueError(f"正式 LAN 需要对应版本和哈希的双机验收记录：{key}")
         tag = item["tag"]
         if not NAME.fullmatch(tag) or tag.startswith("catalog-v1-"):

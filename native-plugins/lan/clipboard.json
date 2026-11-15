@@ -3,9 +3,9 @@
   "Name": "局域网剪贴板共享",
   "Desc": "同步新复制的文本和图片。",
   "Category": "feature",
-  "Version": "1.0.0",
+  "Version": "1.0.1",
   "Abi": "@HOTARU_PLUGIN_ABI@",
   "Id": "lan-clipboard",
   "Requires": "lan-core",
-  "Channel": "development-preview"
+  "Channel": "stable"
 }

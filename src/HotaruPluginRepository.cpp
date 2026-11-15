@@ -429,14 +429,9 @@ QList<Entry> catalogListings(const Catalog& catalog, bool development)
 {
     QMap<QString, Entry> latest;
     for (const auto& e : catalog.entries) {
-        if (!installable(e, true)) continue;
+        if (!installable(e, development)) continue;
         const auto current = latest.constFind(e.id);
-        // 正式版优先展示可安装的正式包；没有正式包时才展示预览。
-        if (current != latest.cend()) {
-            if (!development && e.channel != current->channel) {
-                if (e.channel != "stable") continue;
-            } else if (compare(e.version, current->version) <= 0) continue;
-        }
+        if (current != latest.cend() && compare(e.version, current->version) <= 0) continue;
         latest.insert(e.id, e);
     }
     return latest.values();
@@ -632,7 +627,7 @@ QString activationError() { return lastActivationError; }
 
 namespace {
 const QString remote = QStringLiteral("https://github.com/EienSakura/Hotaru-Plugins/releases/download/");
-const QString latest = QStringLiteral("https://api.github.com/repos/EienSakura/Hotaru-Plugins/releases/latest");
+const QString latestIndex = QStringLiteral("https://github.com/EienSakura/Hotaru-Plugins/releases/latest/download/index-v1.json");
 
 bool safeHttps(const QUrl& url)
 {
@@ -644,7 +639,7 @@ bool allowedUrl(const QUrl& url)
 {
     const auto h = url.host();
     if (!safeHttps(url)) return false;
-    if (h == "api.github.com") return url == QUrl(latest);
+    if (url == QUrl(latestIndex)) return true;
     if (h == "github.com") {
         const auto path = url.path(QUrl::FullyEncoded);
         return !url.hasQuery() && matches(path, "/EienSakura/Hotaru-Plugins/releases/download/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+");
@@ -858,39 +853,35 @@ void Client::refresh(bool force)
     const auto now = QDateTime::currentDateTimeUtc();
     if (m_busy || (!force && m_catalog.expires > now && m_checked.isValid() && m_checked.secsTo(now) < 86400)) return;
     m_busy = true; m_cancelled = false; m_status = QStringLiteral("正在刷新官方目录…"); emit changed();
-    auto response = std::make_shared<QByteArray>();
+    auto bytes = std::make_shared<QByteArray>();
     const auto append = [](const std::shared_ptr<QByteArray>& bytes) {
         return [bytes](const QByteArray& chunk) { bytes->append(chunk); return true; };
     };
-    fetch(QUrl(latest), MiB, append(response), [this, response, append](const QString& why) {
+    fetch(QUrl(latestIndex), MiB, append(bytes), [this, bytes, append](const QString& why) {
         if (!why.isEmpty()) { finish(why); return; }
-        const auto release = QJsonDocument::fromJson(*response).object();
-        const auto tag = release.value("tag_name").toString();
-        if (!matches(tag, "catalog-v1-[1-9][0-9]{0,9}") || release.value("draft").toBool()
-            || release.value("prerelease").toBool()) {
+        const auto sequence = QJsonDocument::fromJson(*bytes).object().value("sequence").toInt();
+        if (sequence <= 0) {
             finish(QStringLiteral("官方仓库尚未发布可用目录")); return;
         }
-        auto bytes = std::make_shared<QByteArray>();
-        fetch(QUrl(remote + tag + "/index-v1.json"), MiB, append(bytes), [this, tag, bytes, append](const QString& why) {
+        // 从对应序号的固定发布下载签名，避免 latest 切换时混用两版资产。
+        auto sig = std::make_shared<QByteArray>();
+        const auto tag = QStringLiteral("catalog-v1-%1").arg(sequence);
+        fetch(QUrl(remote + tag + "/index-v1.sig"), 256, append(sig), [this, sequence, bytes, sig](const QString& why) {
             if (!why.isEmpty()) { finish(why); return; }
-            auto sig = std::make_shared<QByteArray>();
-            fetch(QUrl(remote + tag + "/index-v1.sig"), 256, append(sig), [this, tag, bytes, sig](const QString& why) {
-                if (!why.isEmpty()) { finish(why); return; }
-                QString error;
-                Catalog candidate;
-                candidate.bytes = *bytes; candidate.signatures = *sig;
-                const auto packed = evidence(candidate);
-                auto incoming = decode(packed, error);
-                if (!incoming.sequence) { finish(error); return; }
-                if (tag != QStringLiteral("catalog-v1-%1").arg(incoming.sequence) || incoming.sequence < m_catalog.sequence
-                    || (incoming.sequence == m_catalog.sequence && incoming.bytes != m_catalog.bytes)
-                    || incoming.expires <= QDateTime::currentDateTimeUtc()) {
-                    finish(QStringLiteral("官方目录已过期或版本校验失败")); return;
-                }
-                if (!write(root() + "/catalog.json", packed)) { finish(QStringLiteral("无法保存官方目录缓存")); return; }
-                readCache();
-                finish({});
-            });
+            QString error;
+            Catalog candidate;
+            candidate.bytes = *bytes; candidate.signatures = *sig;
+            const auto packed = evidence(candidate);
+            auto incoming = decode(packed, error);
+            if (!incoming.sequence) { finish(error); return; }
+            if (incoming.sequence != sequence || incoming.sequence < m_catalog.sequence
+                || (incoming.sequence == m_catalog.sequence && incoming.bytes != m_catalog.bytes)
+                || incoming.expires <= QDateTime::currentDateTimeUtc()) {
+                finish(QStringLiteral("官方目录已过期或版本校验失败")); return;
+            }
+            if (!write(root() + "/catalog.json", packed)) { finish(QStringLiteral("无法保存官方目录缓存")); return; }
+            readCache();
+            finish({});
         });
     });
 }
@@ -1055,10 +1046,12 @@ bool selftest(const QStringList& paths, QString& error)
     Catalog catalog;
     QJsonArray published;
     QList<Entry> entries;
+    int stableLanCount = 0;
     for (int i = 0; i < 3; ++i) {
         QTemporaryDir stage(temp.filePath("local-XXXXXX"));
         Entry e;
         if (!readLocalPackage(paths[i], stage.path(), e, error)) return false;
+        if (e.channel == "stable") ++stableLanCount;
         if (i == 1 && HotaruNativeHost::importPackage(paths[i], error))
             return fail(error, QStringLiteral("未验证包绕过了依赖检查"));
         e.channel = i == 2 ? "preview" : "stable";
@@ -1087,8 +1080,8 @@ bool selftest(const QStringList& paths, QString& error)
     };
     const auto signedIndex = sign(2, now, now.addDays(catalogValidityDays));
     catalog = decode(evidence(signedIndex), error);
-    if (catalog.entries.size() != 3 || catalogListings(catalog, false).size() != 3 || catalogListings(catalog, true).size() != 3)
-        return fail(error, QStringLiteral("两种宿主均应列出符合条件的预览包：%1").arg(error));
+    if (catalog.entries.size() != 3 || catalogListings(catalog, false).size() != 2 || catalogListings(catalog, true).size() != 3)
+        return fail(error, QStringLiteral("正式版应隐藏预览包，开发版应显示预览包：%1").arg(error));
     auto mixed = catalog;
     auto newerPreview = entries[0];
     newerPreview.channel = "preview";
@@ -1162,8 +1155,7 @@ bool selftest(const QStringList& paths, QString& error)
     QScopedValueRollback restoreResponses(testResponses, QMap<QUrl, QByteArray>{});
     const auto serve = [&](int sequence, const Catalog& c) {
         const auto tag = QStringLiteral("catalog-v1-%1").arg(sequence);
-        testResponses[QUrl(latest)] = QJsonDocument(QJsonObject{{"tag_name", tag}}).toJson();
-        testResponses[QUrl(remote + tag + "/index-v1.json")] = c.bytes;
+        testResponses[QUrl(latestIndex)] = c.bytes;
         testResponses[QUrl(remote + tag + "/index-v1.sig")] = c.signatures;
     };
     serve(3, previewOnly);
@@ -1214,15 +1206,13 @@ bool selftest(const QStringList& paths, QString& error)
             if (!popup || !popup->isVisible() || !popup->isModal())
                 return fail(error, QStringLiteral("未打开官方仓库弹窗"));
             const auto cards = popup->findChildren<QFrame*>(QStringLiteral("pluginCard"));
-            if (cards.size() != 3)
-                return fail(error, QStringLiteral("仓库弹窗未显示三个签名预览插件"));
+            if (cards.size() != (BuildChannel::development ? 3 : 0))
+                return fail(error, QStringLiteral("只有开发版应看到签名预览插件"));
             for (auto* card : cards) {
                 auto* status = card->findChild<QLabel*>(QStringLiteral("pluginStatus"));
                 auto* action = card->findChild<QPushButton*>(QStringLiteral("pluginCatalogInstall"));
-                if (!status || !status->text().contains(QStringLiteral("开发预览")) || !action ||
-                    (!BuildChannel::development && (action->isEnabled() ||
-                        action->text() != QStringLiteral("仅开发版可从仓库安装"))))
-                    return fail(error, QStringLiteral("预览条目缺少渠道标记或正式版安装限制"));
+                if (!status || !status->text().contains(QStringLiteral("开发预览")) || !action)
+                    return fail(error, QStringLiteral("预览条目缺少渠道标记或安装入口"));
             }
             auto* scroll = popup->findChild<QScrollArea*>(QStringLiteral("pluginRepositoryScroll"));
             auto* manual = popup->findChild<QPushButton*>(QStringLiteral("pluginManualDownload"));
@@ -1253,13 +1243,45 @@ bool selftest(const QStringList& paths, QString& error)
     serve(2, sign(2, now, now.addDays(30)));
     if (!wait([&] { client.refresh(true); }) || client.catalog().sequence != 3)
         return fail(error, QStringLiteral("目录回退覆盖了缓存"));
-    serve(3, signedIndex);
+    serve(3, sign(3, now, now.addDays(29)));
     if (!wait([&] { client.refresh(true); }) || client.catalog().bytes != trusted.bytes)
         return fail(error, QStringLiteral("同序号内容覆盖了缓存"));
+    serve(4, sign(4, now, now.addDays(30)));
+    testResponses[QUrl(remote + "catalog-v1-4/index-v1.sig")] = previewOnly.signatures;
+    if (!wait([&] { client.refresh(true); }) || client.catalog().bytes != trusted.bytes)
+        return fail(error, QStringLiteral("目录和签名来自不同发布时不能覆盖缓存"));
     {
         const QScopedValueRollback offline(holdTestResponse, true);
         if (!wait([&] { client.refresh(true); }) || Client(nullptr).catalog().sequence != 3)
             return fail(error, QStringLiteral("离线不能读取最近签名目录"));
+    }
+    if (stableLanCount) {
+        if (stableLanCount != 3)
+            return fail(error, QStringLiteral("正式候选必须同时提供三个正式 LAN ZIP"));
+        published = {};
+        for (int i = 0; i < 3; ++i) {
+            auto e = entries[i];
+            e.channel = "stable";
+            published << json(e);
+            testResponses[QUrl(remote + e.tag + '/' + e.asset.name)] = read(paths[i], packageLimit);
+        }
+        serve(4, sign(4, now, now.addDays(30)));
+        if (!wait([&] { client.refresh(true); }) || client.catalog().sequence != 4
+            || catalogListings(client.catalog(), false).size() != 3
+            || !planInstall(kHotaruLanFilesId, client.catalog(), desired(), BuildChannel::development, plan, error)
+            || plan.downloads.size() != 3 || plan.downloads.first().id != kHotaruLanCoreId)
+            return fail(error, QStringLiteral("正式 LAN 目录未能规划三个实际 ZIP：%1").arg(error));
+        if (!wait([&] { client.install(plan); }) || !pending())
+            return fail(error, QStringLiteral("正式 LAN ZIP 下载或校验失败：%1").arg(client.status()));
+        HotaruNativeHost::start();
+        const auto installed = HotaruNativeHost::plugins();
+        const bool ready = !pending() && activationError().isEmpty() && installed.size() == 3 &&
+            std::all_of(installed.cbegin(), installed.cend(), [](const auto& item) {
+                return item.loaded && item.source == "official" && !item.preview;
+            });
+        HotaruNativeHost::stop();
+        if (!ready) return fail(error, QStringLiteral("安装后未加载全部正式 LAN 插件：%1").arg(activationError()));
+        return checkCompatibility(paths[3], temp, error);
     }
     if (!BuildChannel::development) {
         QTemporaryDir stage(temp.filePath("stable-XXXXXX"));
