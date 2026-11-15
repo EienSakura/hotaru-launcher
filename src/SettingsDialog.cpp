@@ -630,9 +630,15 @@ QWidget* SettingsDialog::buildPluginPage(QWidget* parent, HotaruPluginRepository
             const auto entry = *offered;
             status->setText(info.preview ? QStringLiteral("来源已验证 · 开发预览") : QStringLiteral("来源已验证"));
             auto* action = new QPushButton(info.installed ? QStringLiteral("更新／替换") : QStringLiteral("安装"), card);
+            action->setObjectName(QStringLiteral("pluginCatalogInstall"));
             actions->addStretch();
             actions->addWidget(action);
             body->addLayout(actions);
+            if (!Repo::installable(entry, BuildChannel::development)) {
+                action->setText(QStringLiteral("仅开发版可从仓库安装"));
+                action->setEnabled(false);
+                return card;
+            }
             const auto current = Repo::desired().value(id);
             const bool same = current.source == "official" && Repo::sameVersion(current.entry.version, entry.version);
             action->setEnabled(!same && !client->busy() && client->catalog().expires > QDateTime::currentDateTimeUtc());
@@ -787,7 +793,7 @@ QWidget* SettingsDialog::buildPluginPage(QWidget* parent, HotaruPluginRepository
         int count = 0;
         if (client) {
             const auto catalog = client->catalog();
-            for (const auto& e : Repo::available(catalog, BuildChannel::development)) {
+            for (const auto& e : Repo::catalogListings(catalog, BuildChannel::development)) {
                 HotaruNativeHost::PluginInfo info;
                 info.id = e.id; info.name = e.name; info.description = e.description;
                 info.version = e.version; info.category = e.category; info.preview = e.channel == "preview";
@@ -810,7 +816,7 @@ QWidget* SettingsDialog::buildPluginPage(QWidget* parent, HotaruPluginRepository
             cancelDownload->setVisible(client->busy());
         }
         const auto status = client ? client->status() : Repo::activationError();
-        const auto empty = client ? QStringLiteral("暂无可安装插件") : QStringLiteral("暂无已安装插件");
+        const auto empty = client ? QStringLiteral("暂无适用于当前版本的插件") : QStringLiteral("暂无已安装插件");
         auto message = count ? status : status.isEmpty() ? empty : empty + QStringLiteral(" · ") + status;
         if (client) {
             const auto catalog = client->catalog();

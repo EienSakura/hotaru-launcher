@@ -49,8 +49,8 @@ struct InstallPlan {
 QString abi();
 QString root();
 bool compatible(const Entry& entry);
-bool visible(const Entry& entry, bool development);
-QList<Entry> available(const Catalog& catalog, bool development);
+bool installable(const Entry& entry, bool development);
+QList<Entry> catalogListings(const Catalog& catalog, bool development);
 bool sameVersion(const QString& left, const QString& right);
 QString storagePath(const Installed& item);
 QString dllPath(const Installed& item);

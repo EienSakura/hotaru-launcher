@@ -421,16 +421,24 @@ bool compatible(const Entry& e)
         || (e.iid == LTOOL_PLUGIN_IID && e.api == LTOOL_PLUGIN_API_VERSION);
     return api && (e.abi.isEmpty() || e.abi == abi()) && contains(e.host, QStringLiteral(LTOOL_VERSION));
 }
-bool visible(const Entry& e, bool development)
+bool installable(const Entry& e, bool development)
 {
     return compatible(e) && e.iid != LTOOL_PLUGIN_IID && (e.channel == "stable" || (development && e.channel == "preview"));
 }
-QList<Entry> available(const Catalog& catalog, bool development)
+QList<Entry> catalogListings(const Catalog& catalog, bool development)
 {
     QMap<QString, Entry> latest;
-    for (const auto& e : catalog.entries)
-        if (visible(e, development) && (!latest.contains(e.id) || compare(e.version, latest[e.id].version) > 0))
-            latest[e.id] = e;
+    for (const auto& e : catalog.entries) {
+        if (!installable(e, true)) continue;
+        const auto current = latest.constFind(e.id);
+        // 正式版优先展示可安装的正式包；没有正式包时才展示预览。
+        if (current != latest.cend()) {
+            if (!development && e.channel != current->channel) {
+                if (e.channel != "stable") continue;
+            } else if (compare(e.version, current->version) <= 0) continue;
+        }
+        latest.insert(e.id, e);
+    }
     return latest.values();
 }
 bool sameVersion(const QString& left, const QString& right) { return compare(left, right) == 0; }
@@ -672,7 +680,7 @@ bool planInstall(const QString& id, const Catalog& catalog, const Inventory& cur
         return fail(error, QStringLiteral("请先刷新官方目录"));
     QMap<QString, QList<Entry>> candidates;
     for (const auto& e : catalog.entries)
-        if (visible(e, development)) candidates[e.id] << e;
+        if (installable(e, development)) candidates[e.id] << e;
     for (auto& versions : candidates)
         std::sort(versions.begin(), versions.end(), [](const Entry& a, const Entry& b) { return compare(a.version, b.version) > 0; });
     if (!candidates.contains(id)) return fail(error, QStringLiteral("当前宿主没有可安装的版本"));
@@ -897,7 +905,7 @@ void Client::install(const InstallPlan& plan, bool activateFirst)
     for (const auto& e : plan.downloads) {
         const auto it = std::find_if(m_catalog.entries.cbegin(), m_catalog.entries.cend(),
             [&](const Entry& signedEntry) { return json(signedEntry) == json(e); });
-        if (it == m_catalog.entries.cend() || !visible(e, BuildChannel::development)
+        if (it == m_catalog.entries.cend() || !installable(e, BuildChannel::development)
             || m_catalog.expires <= QDateTime::currentDateTimeUtc()) {
             finish(QStringLiteral("目录已变化，请重新选择安装")); return;
         }
@@ -1079,8 +1087,21 @@ bool selftest(const QStringList& paths, QString& error)
     };
     const auto signedIndex = sign(2, now, now.addDays(catalogValidityDays));
     catalog = decode(evidence(signedIndex), error);
-    if (catalog.entries.size() != 3 || available(catalog, false).size() != 2 || available(catalog, true).size() != 3)
-        return fail(error, QStringLiteral("渠道过滤或目录解码失败：%1").arg(error));
+    if (catalog.entries.size() != 3 || catalogListings(catalog, false).size() != 3 || catalogListings(catalog, true).size() != 3)
+        return fail(error, QStringLiteral("两种宿主均应列出符合条件的预览包：%1").arg(error));
+    auto mixed = catalog;
+    auto newerPreview = entries[0];
+    newerPreview.channel = "preview";
+    newerPreview.version = "999.0.0";
+    mixed.entries.prepend(newerPreview);
+    const auto listsVersion = [&](bool development, const QString& version) {
+        const auto listings = catalogListings(mixed, development);
+        return std::any_of(listings.cbegin(), listings.cend(), [&](const Entry& e) {
+            return e.id == newerPreview.id && e.version == version;
+        });
+    };
+    if (!listsVersion(false, entries[0].version) || !listsVersion(true, newerPreview.version))
+        return fail(error, QStringLiteral("同一插件的预览包不应遮挡正式版可安装的版本"));
     if (decode(evidence(sign(2, now, now.addDays(catalogValidityDays + 1))), error).sequence)
         return fail(error, QStringLiteral("超过一年有效期的目录应被拒绝"));
     auto changed = signedIndex;
@@ -1159,6 +1180,12 @@ bool selftest(const QStringList& paths, QString& error)
         return fail(error, QStringLiteral("刷新签名目录失败：%1").arg(client.status()));
     const auto trusted = client.catalog();
     {
+        InstallPlan denied;
+        QString reason;
+        if (planInstall(kHotaruLanCoreId, trusted, {}, false, denied, reason) || !denied.downloads.isEmpty())
+            return fail(error, QStringLiteral("正式版不能为仅预览的目录条目生成安装计划"));
+    }
+    {
         const QTemporaryDir noCache(temp.filePath("no-catalog-XXXXXX"));
         if (!noCache.isValid()) return fail(error, QStringLiteral("无法准备无目录夹具"));
         const QScopedValueRollback rootOverride(storageRootOverride, noCache.path());
@@ -1184,9 +1211,19 @@ bool selftest(const QStringList& paths, QString& error)
         for (int i = 0; i < 2; ++i) {
             button->click();
             auto* popup = settings.findChild<QDialog*>(QStringLiteral("pluginRepositoryDialog"));
-            if (!popup || !popup->isVisible() || !popup->isModal() ||
-                popup->findChildren<QFrame*>(QStringLiteral("pluginCard")).size() != available(trusted, BuildChannel::development).size())
-                return fail(error, QStringLiteral("仓库弹窗未显示本渠道的签名缓存"));
+            if (!popup || !popup->isVisible() || !popup->isModal())
+                return fail(error, QStringLiteral("未打开官方仓库弹窗"));
+            const auto cards = popup->findChildren<QFrame*>(QStringLiteral("pluginCard"));
+            if (cards.size() != 3)
+                return fail(error, QStringLiteral("仓库弹窗未显示三个签名预览插件"));
+            for (auto* card : cards) {
+                auto* status = card->findChild<QLabel*>(QStringLiteral("pluginStatus"));
+                auto* action = card->findChild<QPushButton*>(QStringLiteral("pluginCatalogInstall"));
+                if (!status || !status->text().contains(QStringLiteral("开发预览")) || !action ||
+                    (!BuildChannel::development && (action->isEnabled() ||
+                        action->text() != QStringLiteral("仅开发版可从仓库安装"))))
+                    return fail(error, QStringLiteral("预览条目缺少渠道标记或正式版安装限制"));
+            }
             auto* scroll = popup->findChild<QScrollArea*>(QStringLiteral("pluginRepositoryScroll"));
             auto* manual = popup->findChild<QPushButton*>(QStringLiteral("pluginManualDownload"));
             if (!scroll || !manual || manual->isVisible())
