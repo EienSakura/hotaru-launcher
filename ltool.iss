@@ -3,7 +3,7 @@
 ; 产物: installer\Hotaru-{#MyAppVersion}-setup.exe（按用户安装到 %LOCALAPPDATA%\Programs\Hotaru，无需管理员）
 
 #define MyAppName "Hotaru"
-#define MyAppVersion "1.0.1"
+#define MyAppVersion "1.0.2"
 #define MyAppPublisher "Hotaru"
 #define MyAppExeName "Hotaru.exe"
 
@@ -117,19 +117,27 @@ Type: files; Name: "{app}\imageformats\qtiff.dll"
 Name: "{autoprograms}\{#MyAppName}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
 Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
 
-[Registry]
-Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; \
-    ValueName: "ltool"; ValueData: """{app}\{#MyAppExeName}"""; Flags: uninsdeletevalue; Tasks: autostart
-
 [Run]
+Filename: "{app}\{#MyAppExeName}"; Parameters: "{code:AutostartSetupArgs}"; \
+    Flags: runhidden waituntilterminated
 Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#MyAppName}}"; \
     Flags: nowait postinstall skipifsilent
 
 [UninstallRun]
-; 退出托盘实例由 CloseApplications/系统重启管理器处理，无需额外命令
+Filename: "{app}\{#MyAppExeName}"; Parameters: "--remove-autostart"; \
+    Flags: runhidden waituntilterminated; RunOnceId: "HotaruRemoveAutostart"
 
 [Messages]
 SelectDirDesc=Hotaru 安装位置
 SelectDirLabel3=安装程序将把 萤 Hotaru 安装到以下文件夹。
 WelcomeLabel2=这将安装 萤 Hotaru 桌面启动器：%nAlt+Space 呼出搜索框，自由固定面板、分页分组与可安装主题。
+
+[Code]
+function AutostartSetupArgs(Param: String): String;
+begin
+  if WizardIsTaskSelected('autostart') then
+    Result := '--setup-autostart'
+  else
+    Result := '--migrate-autostart';
+end;
 

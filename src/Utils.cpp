@@ -1,4 +1,9 @@
 #include "Utils.h"
+#include "BuildChannel.h"
+#ifdef _WIN32
+#include <windows.h>
+#include <sddl.h>
+#endif
 
 #include "Theme.h"
 #include "WebShortcuts.h"   // 默认 webs.json 的那份字节只有它算得出（"什么算默认值"不许有第二份答案）
@@ -42,6 +47,31 @@
 #include <QSettings>
 
 
+QString hotaruInstanceKey()
+{
+#ifdef _WIN32
+    DWORD session = 0;
+    HANDLE token = nullptr;
+    if (!ProcessIdToSessionId(GetCurrentProcessId(), &session)
+        || !OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token))
+        return {};
+    DWORD size = 0;
+    GetTokenInformation(token, TokenUser, nullptr, 0, &size);
+    QByteArray buffer(size, Qt::Uninitialized);
+    const bool got = size && GetTokenInformation(token, TokenUser, buffer.data(), size, &size);
+    CloseHandle(token);
+    LPWSTR sid = nullptr;
+    if (!got || !ConvertSidToStringSidW(reinterpret_cast<TOKEN_USER*>(buffer.data())->User.Sid, &sid))
+        return {};
+    const auto name = QStringLiteral("%1.instance.%2.%3")
+        .arg(BuildChannel::appId()).arg(session).arg(QString::fromWCharArray(sid));
+    LocalFree(sid);
+    return name;
+#else
+    return BuildChannel::appId() + QStringLiteral(".instance");
+#endif
+}
+
 namespace Utils {
 
 namespace {
@@ -83,21 +113,22 @@ QString resolveDataDir(const QString& appDir, const QString& envOverride, const 
     //   不要放在 C 盘"。以前这里只有 %APPDATA%\ltool 一档，378 MB（深索引 320 + OCR 模型 33 +
     //   剪贴板图 16）全压在系统盘上。
     if (appDirWritable)
-        return QDir::fromNativeSeparators(appDir) + "/data";
+        return QDir::fromNativeSeparators(appDir)
+            + (BuildChannel::development ? QStringLiteral("/data-dev") : QStringLiteral("/data"));
     // ③装到只读位置（比如塞进 Program Files）：退回老地方，并留一条日志（下面 dataDir() 里）
-    return appData + "/ltool";
+    return appData + (BuildChannel::development ? QStringLiteral("/HotaruDev") : QStringLiteral("/ltool"));
 }
 
 QString dataDir()
 {
     static const QString cached = [] {
         const QString app = QDir::fromNativeSeparators(QCoreApplication::applicationDirPath());
-        const QString env = qEnvironmentVariable("LTOOL_DATA_DIR");
+        const QString env = qEnvironmentVariable(BuildChannel::dataOverride);
         const QString appData = legacyBase();
         const bool writable = dirIsWritable(app);
         const QString d = resolveDataDir(app, env, appData, writable);
         if (env.isEmpty() && !writable)
-            log(QStringLiteral("数据目录：%1 写不了，退回 %2（这就是以前那个 %APPDATA%\\ltool 的位置）")
+            log(QStringLiteral("数据目录：%1 写不了，退回 %2")
                     .arg(app.isEmpty() ? QStringLiteral("(拿不到 exe 目录)") : app, d));
         QDir().mkpath(d);
         return d;
@@ -112,7 +143,9 @@ namespace {
 // 2026-10-21 那次丢数据丢的正是"这几处对同一件事各有说法"。
 bool legacyPair(QString* legacy, QString* now, QString* refusal)
 {
-    if (!qEnvironmentVariable("LTOOL_DATA_DIR").isEmpty()) {
+    if (BuildChannel::development)
+        return false;
+    if (!qEnvironmentVariable(BuildChannel::dataOverride).isEmpty()) {
         if (refusal)
             *refusal = QStringLiteral("没搬：数据目录被 LTOOL_DATA_DIR 指走了（沙箱/便携模式）");
         return false;
@@ -382,6 +415,8 @@ QString configuredDir(const char* key, const QString& fallback)
 // 装到只读位置 / 没写权限的机器（比如塞进 Program Files）退回数据目录，并留一条日志。
 QString mediaRoot()
 {
+    if (BuildChannel::development)
+        return dataDir();
     static const QString root = [] {
         const QString app = QDir::fromNativeSeparators(QCoreApplication::applicationDirPath());
         const QFileInfo fi(app);
@@ -530,7 +565,7 @@ void trayNote(const QString& title, const QString& msg, int msec)
 {
     {
         QLocalSocket probe;
-        probe.connectToServer(QString::fromWCharArray(kInstanceKey));
+        probe.connectToServer(hotaruInstanceKey());
         if (probe.waitForConnected(200)) {
             probe.write("note\t" + title.toUtf8() + '\t' + msg.toUtf8() + "\n");
             probe.waitForBytesWritten(200);

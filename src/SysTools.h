@@ -9,6 +9,7 @@
 namespace SysTools {
 
 QVector<AppEntry> systemTools();
+bool aliasMatches(const AppEntry& app, const QString& query);
 
 // 电源那两件事：搜索框里整条输入「休眠 / sleep」「关机 / shutdown」时回车直接动手。
 // 返回空串 = 已经叫起来了；非空 = 人话原因（没开休眠、权限不够…）—— 调用方必须照说，

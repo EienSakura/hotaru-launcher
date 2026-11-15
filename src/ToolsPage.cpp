@@ -267,6 +267,7 @@ void ToolsPage::applyUninstall(const QString& file, const QString& name, QLabel*
 {
     const QString res = PluginStore::uninstall(file);
     if (res == QLatin1String("pending")) {
+        PluginHost::reload();
         if (state)
             state->setText(QStringLiteral("已安排卸载 · 这个进程还加载着它，下次启动真删掉"));
         rebuildGrid();
@@ -305,8 +306,8 @@ ToolsPage::ToolsPage(QWidget* parent)
     refresh->setObjectName(QStringLiteral("storeRefresh"));
     refresh->setCursor(Qt::PointingHandCursor);
     refresh->setToolTip(QStringLiteral("拉商店那份 plugins-index.json。\n"
-                                      "内置地址沿用上游 ltool v1.5.0，未测试与 Hotaru 适配，需自行适配，"
-                                      "地址在配置页「插件清单地址」那一行，代理沿用「下载代理」那一行。"));
+                                      "内置地址沿用上游 ltool v1.5.0，未测试与 Hotaru 适配，需自行适配。"
+                                      "代理沿用配置页的「下载代理」。"));
     auto* repoBtn = new QPushButton(QStringLiteral("上游插件仓库"), this);
     repoBtn->setObjectName(QStringLiteral("storeRepo"));
     repoBtn->setCursor(Qt::PointingHandCursor);

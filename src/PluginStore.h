@@ -195,6 +195,9 @@ QString setEnabled(const QString& file, bool on, const QString& dir = QString())
 // 而这张卡可能正开着。所以"当场能删的就删，删不动的说清什么时候生效"，不假装已经卸了。
 QString uninstall(const QString& file, const QString& dir = QString());
 QVector<QString> pendingRemoves();               // 表里排着的文件名
+// 本地兼容 DLL 替换先落到同目录暂存，重启时才提交。
+QString stageLocalReplacement(const QString& from, const QString& target);
+void applyLocalReplacements(const QString& dir = QString());
 int applyPendingRemoves(const QString& dir = QString());   // 启动时调，返回真删掉了几个
 
 } // namespace PluginStore

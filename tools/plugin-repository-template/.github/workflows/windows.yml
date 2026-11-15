@@ -1,0 +1,42 @@
+name: 构建 Windows 插件
+on:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  windows-x64:
+    runs-on: windows-2022
+    env:
+      VCPKG_DISABLE_METRICS: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - name: 安装锁定的 vcpkg
+        shell: pwsh
+        run: |
+          $baseline = (Get-Content vcpkg.json -Raw | ConvertFrom-Json).'builtin-baseline'
+          git init build/vcpkg
+          git -C build/vcpkg fetch --depth 1 https://github.com/microsoft/vcpkg $baseline
+          git -C build/vcpkg checkout --detach FETCH_HEAD
+          & ./build/vcpkg/bootstrap-vcpkg.bat -disableMetrics
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Add-Content $env:GITHUB_ENV "VCPKG_ROOT=$pwd/build/vcpkg"
+      - name: 构建锁定的 BoringSSL
+        shell: pwsh
+        run: |
+          $version = '0.20250818.0'
+          Invoke-WebRequest "https://codeload.github.com/google/boringssl/tar.gz/refs/tags/$version" -OutFile build/boringssl.tar.gz
+          if ((Get-FileHash build/boringssl.tar.gz).Hash -ne 'AFD075EA349F8346B94B2536DF1A4494870F7FCB9A868B0A200B0184648B054C') { throw 'BoringSSL 哈希不匹配' }
+          tar -xf build/boringssl.tar.gz -C build
+          cmake -S "build/boringssl-$version" -B build/boringssl -G 'Visual Studio 17 2022' -A x64 -DOPENSSL_NO_ASM=ON
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cmake --build build/boringssl --config Release --target crypto --parallel 4
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: 构建、测试和打包
+        shell: pwsh
+        run: ./tools/build-lan.ps1 -VcpkgRoot $env:VCPKG_ROOT -BoringSslSource build/boringssl-0.20250818.0 -BoringSslCrypto build/boringssl/Release/crypto.lib
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hotaru-plugin-windows-x64
+          path: dist/*
+          if-no-files-found: error

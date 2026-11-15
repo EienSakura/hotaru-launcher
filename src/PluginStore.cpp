@@ -1,3 +1,4 @@
+#include <QSaveFile>
 #include "PluginStore.h"
 
 #include <QNetworkAccessManager>
@@ -324,6 +325,8 @@ QVector<Entry> parseIndex(const QByteArray& json, QStringList* problems)
         e.name = o.value(QStringLiteral("name")).toString();
         e.desc = o.value(QStringLiteral("desc")).toString();
         e.file = o.value(QStringLiteral("file")).toString().trimmed();
+        if (PluginHost::isRetired(e.id) || PluginHost::isRetired(Platform::pluginIdOf(e.file)))
+            continue;
         e.url = o.value(QStringLiteral("url")).toString().trimmed();
         e.sha256 = o.value(QStringLiteral("sha256")).toString().trimmed();
         e.color = o.value(QStringLiteral("color")).toString();
@@ -485,6 +488,8 @@ QVector<Row> localRows(const QString& dir)
         Row r;
         r.remote.file = base;
         const QString id = Platform::pluginIdOf(base);
+        if (PluginHost::isRetired(id))
+            continue;
         r.remote.id = id;
         // 元数据只读产物里嵌的那份 plugin.json（PluginHost::scan 的产物），不加载它；
         // .off 那个不在扫描结果里（宿主根本不会去认它），就只能报文件名。
@@ -636,6 +641,8 @@ QString uninstall(const QString& file, const QString& dir)
 {
     const QString d = local(dir);
     const QString live = d + QLatin1Char('/') + file;
+    QFile::remove(live + QStringLiteral(".hotaru-local-stage"));
+    QFile::remove(live + QStringLiteral(".off.hotaru-local-stage"));
     if (!QFileInfo::exists(live) && !QFileInfo::exists(live + QStringLiteral(".off"))) {
         QStringList p = pendingList();
         if (p.removeAll(file) > 0) {          // 之前排过队、文件已经不在了：把账清掉
@@ -668,6 +675,46 @@ QVector<QString> pendingRemoves()
     for (const QString& f : pendingList())
         out.append(f);
     return out;
+}
+
+QString stageLocalReplacement(const QString& from, const QString& target)
+{
+    QFile in(from);
+    QSaveFile staged(target + QStringLiteral(".hotaru-local-stage"));
+    if (!in.open(QIODevice::ReadOnly) || !staged.open(QIODevice::WriteOnly))
+        return QStringLiteral("无法暂存兼容插件");
+    while (!in.atEnd()) {
+        const auto bytes = in.read(64 * 1024);
+        if (bytes.isEmpty() || staged.write(bytes) != bytes.size()) return QStringLiteral("无法写入兼容插件");
+    }
+    return staged.commit() ? QString{} : QStringLiteral("无法保存待重启的兼容插件");
+}
+
+void applyLocalReplacements(const QString& dir)
+{
+    const auto folder = QDir(local(dir));
+    const auto pending = pendingRemoves();
+    constexpr auto suffix = QLatin1String(".hotaru-local-stage");
+    for (const auto& name : folder.entryList({QStringLiteral("*.dll.hotaru-local-stage"),
+            QStringLiteral("*.dll.off.hotaru-local-stage")}, QDir::Files | QDir::NoSymLinks)) {
+        const auto target = name.chopped(suffix.size());
+        const auto live = target.endsWith(".off") ? target.chopped(4) : target;
+        const auto path = folder.filePath(name);
+        if (pending.contains(live) || !QFileInfo::exists(folder.filePath(target))) {
+            QFile::remove(path);
+            continue;
+        }
+        QFile in(path);
+        QSaveFile out(folder.filePath(target));
+        if (!in.open(QIODevice::ReadOnly) || !out.open(QIODevice::WriteOnly)) continue;
+        bool valid = true;
+        while (!in.atEnd()) {
+            const auto chunk = in.read(64 * 1024);
+            if (chunk.isEmpty() || out.write(chunk) != chunk.size()) { valid = false; break; }
+        }
+        if (valid && out.commit()) { in.close(); QFile::remove(path); }
+        else Utils::log(QStringLiteral("兼容插件待重启替换失败：%1").arg(target));
+    }
 }
 
 int applyPendingRemoves(const QString& dir)

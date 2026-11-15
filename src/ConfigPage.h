@@ -59,7 +59,6 @@ private:
     QLineEdit* m_proxy = nullptr;
     QRadioButton* m_themeDark = nullptr;
     QRadioButton* m_themeLight = nullptr;
-    QLineEdit* m_storeUrl = nullptr;
     QLineEdit* m_storeMirrors = nullptr;   // 拉插件时先试的这些前缀，留空=内置那两条   // 插件商店那份 index.json 的地址，留空=内置那条
     QComboBox* m_engine = nullptr;
     QCheckBox* m_deep = nullptr;
@@ -73,9 +72,6 @@ private:
     QLineEdit* m_capDir = nullptr;
     QLineEdit* m_recDir = nullptr;
     QLabel* m_dirInfo = nullptr;
-    QCheckBox* m_clip = nullptr;
-    QSpinBox* m_clipDays = nullptr;
-    QLabel* m_clipInfo = nullptr;
     QCheckBox* m_imePunct = nullptr;
     QCheckBox* m_favorites = nullptr;
     QCheckBox* m_shellMenu = nullptr;
