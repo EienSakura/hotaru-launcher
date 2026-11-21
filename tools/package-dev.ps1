@@ -44,6 +44,8 @@ try {
         }
         Add-DevEntry (Join-Path $runtime 'HotaruDev.exe') 'HotaruDev.exe'
         foreach ($dll in Get-ChildItem -LiteralPath $runtime -File -Filter '*.dll') {
+            # 旧构建目录里可能还留有 Windows 提供的 ICU 副本。
+            if ($dll.Name -ieq 'icuuc.dll') { continue }
             Add-DevEntry $dll.FullName $dll.Name
         }
         # 仅打包运行库；不递归收集配置、缓存、日志或工具插件。

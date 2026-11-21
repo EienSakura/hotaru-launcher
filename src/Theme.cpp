@@ -202,13 +202,14 @@ void clipNativeRoundedCorners(QWidget* widget, int radius)
     if (applyingRegion || QGuiApplication::platformName() != QLatin1String("windows"))
         return;
     const auto hwnd = reinterpret_cast<HWND>(widget->internalWinId());
-    RECT bounds{};
-    if (!hwnd || !GetWindowRect(hwnd, &bounds))
+    const qreal scale = widget->devicePixelRatioF();
+    const QSize size = widget->size() * scale;
+    if (!hwnd || size.isEmpty())
         return;
+    // Qt 在 Show 之后才同步原生尺寸，此时 HWND 可能仍只有菜单的初始大小。
     // 用原生设备像素限制窗口的绘制区域，给 Qt 绘制的抗锯齿边缘留一个像素。
-    const int diameter = qRound(2 * radius * widget->devicePixelRatioF());
-    const HRGN region = CreateRoundRectRgn(-1, -1, bounds.right - bounds.left + 1,
-                                          bounds.bottom - bounds.top + 1, diameter, diameter);
+    const int diameter = qRound(2 * radius * scale);
+    const HRGN region = CreateRoundRectRgn(-1, -1, size.width() + 1, size.height() + 1, diameter, diameter);
     const QScopedValueRollback guard(applyingRegion, true);
     if (region && !SetWindowRgn(hwnd, region, IsWindowVisible(hwnd)))
         DeleteObject(region);

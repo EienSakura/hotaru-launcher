@@ -501,6 +501,8 @@ if(QT_WINDEPLOYQT_EXE)
                 --exclude-plugins qtuiotouchplugin
                 --include-plugins qsvg,qsvgicon
                 "$<TARGET_FILE:ltool>"
+        # Qt 的 winsdkicu 使用 Windows 自带的库。旧版部署工具可能复制构建机上的系统副本。
+        COMMAND "${CMAKE_COMMAND}" -E rm -f "$<TARGET_FILE_DIR:ltool>/icuuc.dll"
         COMMENT "windeployqt: 部署 Qt 运行库到输出目录"
         VERBATIM
     )

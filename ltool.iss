@@ -3,24 +3,22 @@
 ; 产物: installer\Hotaru-{#MyAppVersion}-setup.exe（按用户安装到 %LOCALAPPDATA%\Programs\Hotaru，无需管理员）
 
 #define MyAppName "Hotaru"
+#define MyAppGuid "{CF203ED4-8238-4B70-BB92-E4E7B2D3BE71}"
 #define MyAppVersion "1.1.0"
 #define MyAppPublisher "Hotaru"
 #define MyAppExeName "Hotaru.exe"
 
 [Setup]
 ; 衍生版使用独立标识，避免覆盖上游安装或共用卸载项。
-AppId={{CF203ED4-8238-4B70-BB92-E4E7B2D3BE71}
+AppId={{#MyAppGuid}
 AppName={#MyAppName}
 AppVersion={#MyAppVersion}
 AppPublisher={#MyAppPublisher}
 DefaultDirName={localappdata}\Programs\{#MyAppName}
 DisableProgramGroupPage=yes
 PrivilegesRequired=lowest
-; 2026-10-21：Qt 6.10 自己就只支持 Windows 10 及以上，而这套东西还硬依赖 UCRT
-; （`api-ms-win-crt-*`，Win7/8.1 得单独装 KB2999226）—— 以前没写这一行，Win7/8.1 上
-; **装是装得上的，双击却没反应**（Qt6Core 起不来），那是最难查的一种坏。
-; 写下来之后安装器当场拒装并说清"需要 Windows 10 或以上"。Win10 用户不受任何影响。
-MinVersion=10.0
+; Qt 6.10 支持 Windows 10 1809（17763）及以上。该范围内 Windows 已自带 ICU。
+MinVersion=10.0.17763
 OutputDir=installer
 OutputBaseFilename=Hotaru-{#MyAppVersion}-setup
 SetupIconFile=resources\ltool.ico
@@ -38,8 +36,7 @@ SetupIconFile=resources\ltool.ico
 ; 也就是默认已经吃满多线程。
 ; payload 也剪不动：按 PE 导入表从 ltool.exe 走一遍闭包，71.1MB 里只有 4.0MB 不在闭包上，
 ; 而那 4.0MB 全是运行时按目录加载的插件（platforms/qwindows、styles、imageformats、tls）
-; 加按需加载的 7zip.dll。最肥的 icudt78.dll（31.58MB，占整包 44%）是 Qt6Core 硬导入的
-; ICU 数据，实测从安装目录藏掉它，ltool.exe 直接起不来。
+; 加按需加载的 7zip.dll。当前 Qt 构建使用目标 Windows 提供的系统 ICU。
 ; 注意别用 #elifdef —— ISPP 6 不认（"Unknown preprocessor directive"，整个编译当场 abort，
 ; 而 deliver.ps1 那层只看文件在不在，会把它当成"打包成功、体积没变"糊过去），只能嵌套 #ifdef。
 #ifdef FINAL
@@ -55,6 +52,7 @@ SolidCompression=yes
 WizardStyle=modern
 UninstallDisplayIcon={app}\{#MyAppExeName}
 CloseApplications=yes
+RestartApplications=no
 ChangesEnvironment=no
 
 [Languages]
@@ -80,8 +78,9 @@ Source: "build\Release\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
 ; windeployqt 的 --no-system-d*-compiler / --exclude-plugins，这里是挡历史遗留副本的第二道
 ; captures / recordings：截图/录像的默认落点就是 exe 旁边这两个文件夹，本机自测要是
 ; 手滑在 build\Release 里跑过一次 F1，别让那几张图跟着安装包出去
+; 即使旧构建目录里有系统 ICU，也不能从构建机带到目标机。
 Source: "build\Release\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs; \
-    Excludes: "=,*.exe,*.lib,*.exp,captures,recordings,data,D3Dcompiler_47.dll,dxcompiler.dll,dxil.dll,qtuiotouchplugin.dll,qjp2.dll,qwebp.dll,qtiff.dll,qoffscreen.dll,ltool-plugins,ltool-plugins\*"
+    Excludes: "=,*.exe,*.lib,*.exp,captures,recordings,data,\icuuc.dll,D3Dcompiler_47.dll,dxcompiler.dll,dxil.dll,qtuiotouchplugin.dll,qjp2.dll,qwebp.dll,qtiff.dll,qoffscreen.dll,ltool-plugins,ltool-plugins\*"
 
 ; 默认安装器不含插件；只有显式传入 -DBUNDLE_PLUGINS 才收集额外构建的 DLL。
 #ifdef BUNDLE_PLUGINS
@@ -96,6 +95,7 @@ Source: "build\Release\ltool-plugins\*.dll"; DestDir: "{app}\ltool-plugins"; Fla
 ; 老版本装出去的无用文件：Inno 不会自动删掉已经不在包里的东西，得点名清理，
 ; 否则升级完安装目录还是 90MB
 [InstallDelete]
+Type: files; Name: "{app}\icuuc.dll"; Check: ShouldRemoveLegacyIcu
 Type: files; Name: "{app}\D3Dcompiler_47.dll"
 Type: files; Name: "{app}\dxcompiler.dll"
 Type: files; Name: "{app}\dxil.dll"
@@ -115,10 +115,9 @@ Name: "{autoprograms}\{#MyAppName}\{#MyAppName}"; Filename: "{app}\{#MyAppExeNam
 Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
 
 [Run]
+; 仅运行写入或迁移开机启动项的短命令。常驻程序由用户从开始菜单启动。
 Filename: "{app}\{#MyAppExeName}"; Parameters: "{code:AutostartSetupArgs}"; \
     Flags: runhidden waituntilterminated
-Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#MyAppName}}"; \
-    Flags: nowait postinstall skipifsilent
 
 [UninstallRun]
 Filename: "{app}\{#MyAppExeName}"; Parameters: "--remove-autostart"; \
@@ -130,6 +129,54 @@ SelectDirLabel3=安装程序将把 萤 Hotaru 安装到以下文件夹。
 WelcomeLabel2=这将安装 萤 Hotaru 桌面启动器：%nAlt+Space 呼出搜索框，自由固定面板、分页分组与可安装主题。
 
 [Code]
+const
+  HotaruUninstallKey = 'Software\Microsoft\Windows\CurrentVersion\Uninstall\{#MyAppGuid}_is1';
+  ReparsePoint = $400;
+  InvalidAttributes = $FFFFFFFF;
+
+function GetPathAttributes(const Path: String): Cardinal;
+  external 'GetFileAttributesW@kernel32.dll stdcall';
+function GetLongPath(const Path: String; Buffer: String; Size: Cardinal): Cardinal;
+  external 'GetLongPathNameW@kernel32.dll stdcall';
+
+function ShouldRemoveLegacyIcu: Boolean;
+var
+  AppDir, InstalledDir, LongAppDir, Dir: String;
+  Count, Attr: Cardinal;
+begin
+  Result := False;
+  AppDir := ExpandConstant('{app}');
+  if not RegQueryStringValue(HKCU, HotaruUninstallKey, 'InstallLocation', InstalledDir) then
+    Exit;
+  if not PathSame(AddBackslash(AppDir), AddBackslash(InstalledDir)) or
+     not FileExists(AppDir + '\{#MyAppExeName}') then
+    Exit;
+
+  { 使用长路径比较，避免将 Windows 目录的短文件名误认为应用目录。 }
+  SetLength(LongAppDir, 32768);
+  Count := GetLongPath(AppDir, LongAppDir, Length(LongAppDir));
+  if (Count = 0) or (Count >= Length(LongAppDir)) then
+    Exit;
+  SetLength(LongAppDir, Count);
+  if PathStartsWith(AddBackslash(LongAppDir), AddBackslash(ExpandConstant('{win}')), True) then
+    Exit;
+
+  Attr := GetPathAttributes(AppDir + '\icuuc.dll');
+  if (Attr = InvalidAttributes) or ((Attr and ReparsePoint) <> 0) then
+    Exit;
+
+  { 应用目录及其父目录不能通过目录联接指向其他位置。 }
+  Dir := RemoveBackslashUnlessRoot(AppDir);
+  while not PathSame(Dir, AddBackslash(ExtractFileDrive(Dir))) do
+  begin
+    Attr := GetPathAttributes(Dir);
+    if (Attr = InvalidAttributes) or ((Attr and ReparsePoint) <> 0) then
+      Exit;
+    Dir := ExtractFileDir(Dir);
+  end;
+  Result := True;
+end;
+
 function AutostartSetupArgs(Param: String): String;
 begin
   if WizardIsTaskSelected('autostart') then

@@ -3,6 +3,7 @@
 #include "HotaruNativeHost.h"
 #include "HotaruPluginRepository.h"
 #include "InstallLogDialog.h"
+#include "LauncherGrid.h"
 #include "LauncherTheme.h"
 #include "PinnedApps.h"
 #include "PluginHost.h"
@@ -17,6 +18,7 @@
 #include <QApplication>
 #include <QCheckBox>
 #include <QComboBox>
+#include <QContextMenuEvent>
 #include <QDir>
 #include <QFile>
 #include <QFocusFrame>
@@ -31,6 +33,7 @@
 #include <QMessageBox>
 #include <QMouseEvent>
 #include <QPainter>
+#include <QPointer>
 #include <QPushButton>
 #include <QRadioButton>
 #include <QRegularExpression>
@@ -86,13 +89,12 @@ bool hasSmoothFrame(const QPixmap& shot)
     return true;
 }
 
-bool hasNativeRoundedFrame(HWND hwnd)
+bool hasNativeRoundedFrame(HWND hwnd, const QSize& size)
 {
-    RECT bounds{};
-    if (!GetWindowRect(hwnd, &bounds))
+    if (!hwnd || size.isEmpty())
         return false;
-    const int right = bounds.right - bounds.left - 1;
-    const int bottom = bounds.bottom - bounds.top - 1;
+    const int right = size.width() - 1;
+    const int bottom = size.height() - 1;
     const HRGN region = CreateRectRgn(0, 0, 0, 0);
     if (!region)
         return false;
@@ -103,6 +105,128 @@ bool hasNativeRoundedFrame(HWND hwnd)
         && PtInRegion(region, 0, bottom / 2) && PtInRegion(region, right, bottom / 2);
     DeleteObject(region);
     return rounded;
+}
+
+int runLauncherPopupAudit(const QString& package)
+{
+    if (QGuiApplication::platformName() != QLatin1String("windows"))
+        return 1;
+
+    QString error;
+    if (!Theme::importPackage(package, &error)) {
+        std::printf("FAIL 导入测试主题：%s\n", qPrintable(error));
+        return 1;
+    }
+    const auto groupId = QStringLiteral("popup-audit-group");
+    auto fixture = PinnedApps::config();
+    auto pin = PinnedApps::fromTarget(QCoreApplication::applicationFilePath());
+    pin.title = QStringLiteral("固定软件测试");
+    pin.gridRow = 0;
+    pin.gridColumn = 0;
+    fixture.pinnedApps = {pin};
+    fixture.groups = {{groupId, QStringLiteral("测试分组"), 0, 1}};
+    fixture.pages = 1;
+    fixture.lastPage = 0;
+    if (!PinnedApps::saveConfig(fixture, &error)) {
+        std::printf("FAIL 保存测试格位：%s\n", qPrintable(error));
+        return 1;
+    }
+
+    // 保留真实右键入口和弹出流程，但在 Show 时拦住 HWND 上屏。
+    class HidePopups final : public QObject {
+    public:
+        QPointer<QMenu> shown;
+
+    private:
+        bool eventFilter(QObject* watched, QEvent* event) override
+        {
+            if (event->type() == QEvent::Show) {
+                if (auto* menu = qobject_cast<QMenu*>(watched)) {
+                    menu->setAttribute(Qt::WA_DontShowOnScreen);
+                    shown = menu;
+                }
+            }
+            return false;
+        }
+    } hidePopups;
+    qApp->installEventFilter(&hidePopups);
+    QApplication::setEffectEnabled(Qt::UI_AnimateMenu, false);
+
+    SearchWindow launcher;
+    launcher.setAttribute(Qt::WA_DontShowOnScreen);
+    launcher.show();
+    launcher.refreshLauncher();
+    auto* grid = launcher.findChild<LauncherGrid*>(QStringLiteral("hotaruGrid"));
+    auto* pages = launcher.findChild<QWidget*>(QStringLiteral("hotaruPages"));
+    if (!grid || !pages)
+        return 1;
+
+    int failures = 0;
+    const auto shots = QDir::tempPath() + QStringLiteral("/launcher-popups");
+    QDir().mkpath(shots);
+    const auto clickMenu = [&](QWidget* owner, const QPoint& pos, const char* name, const QStringList& expected) {
+        bool complete = false;
+        hidePopups.shown.clear();
+        QTimer timer;
+        timer.setSingleShot(true);
+        QObject::connect(&timer, &QTimer::timeout, &launcher, [&] {
+            auto* menu = hidePopups.shown.data();
+            if (!menu)
+                return;
+            const auto hwnd = reinterpret_cast<HWND>(menu->internalWinId());
+            QStringList actions;
+            for (auto* action : menu->actions())
+                if (!action->isSeparator() && menu->rect().contains(menu->actionGeometry(action)))
+                    actions.append(action->text());
+            complete = hwnd && !IsWindowVisible(hwnd) && actions == expected
+                && hasNativeRoundedFrame(hwnd, menu->size() * menu->devicePixelRatioF())
+                && menu->grab().save(shots + QLatin1Char('/') + QLatin1String(name) + QStringLiteral(".png"));
+            if (!complete)
+                std::printf("  %s: %s\n", name, qPrintable(actions.join(QStringLiteral(" / "))));
+            menu->hide();
+        });
+        timer.start(0);
+        QContextMenuEvent click(QContextMenuEvent::Mouse, pos, owner->mapToGlobal(pos));
+        QCoreApplication::sendEvent(owner, &click);
+        QCoreApplication::processEvents();
+        std::printf("%s %s\n", complete ? "ok" : "FAIL", name);
+        failures += !complete;
+    };
+    clickMenu(grid, grid->cellRect(0, 2).center(), "grid-empty",
+              {QStringLiteral("添加程序或脚本…"), QStringLiteral("添加磁盘文件夹…"),
+               QStringLiteral("新建面板文件夹"), QStringLiteral("删除当前页")});
+    clickMenu(grid, grid->cellRect(0, 0).center(), "pinned-app",
+              {QStringLiteral("运行"), QStringLiteral("以管理员身份运行"), QStringLiteral("打开所在位置"),
+               QStringLiteral("重命名…"), QStringLiteral("属性…"), QStringLiteral("移除")});
+    clickMenu(grid, grid->cellRect(0, 1).center(), "group",
+              {QStringLiteral("打开"), QStringLiteral("重命名…"), QStringLiteral("解散")});
+    clickMenu(pages, pages->rect().center(), "pages", {QStringLiteral("删除当前页")});
+    emit grid->activated(groupId);
+    if (auto* group = launcher.findChild<LauncherGrid*>(QStringLiteral("hotaruGroupGrid"))) {
+        clickMenu(group, group->cellRect(0, 0).center(), "group-empty",
+                  {QStringLiteral("添加程序或脚本…"), QStringLiteral("添加磁盘文件夹…"), QStringLiteral("删除当前页")});
+    } else {
+        ++failures;
+    }
+    auto* input = launcher.findChild<QLineEdit*>(QStringLiteral("input"));
+    auto* list = launcher.findChild<QListWidget*>(QStringLiteral("list"));
+    if (!input || !list)
+        return failures + 1;
+    input->setText(pin.title);
+    launcher.flushSearch();
+    for (int row = 0; row < list->count(); ++row) {
+        auto* item = list->item(row);
+        const int index = item->data(Qt::UserRole).toInt();
+        if (index >= 0 && launcher.resultAt(index).kind == SearchResult::PinnedApp) {
+            clickMenu(list->viewport(), list->visualItemRect(item).center(), "search-pinned",
+                      {QStringLiteral("运行"), QStringLiteral("以管理员身份运行"), QStringLiteral("打开所在位置"),
+                       QStringLiteral("重命名…"), QStringLiteral("属性…"), QStringLiteral("移除")});
+            std::printf("launcher popups: %d failures (%s)\n", failures, qPrintable(shots));
+            return failures;
+        }
+    }
+    std::puts("FAIL 找不到测试用固定软件搜索结果");
+    return failures + 1;
 }
 
 int runSurfaceAudit(const QStringList& args)
@@ -559,16 +683,22 @@ int runChromeAudit(bool windowsBackend)
                 modal.ensurePolished();
                 modal.resize(modal.sizeHint().expandedTo(QSize(240, 160)));
                 // 保持 HWND 隐藏，同时检查实际窗口区域和 Qt 绘制。
-                const HWND hwnd = reinterpret_cast<HWND>(modal.winId());
-                QResizeEvent layoutEvent(modal.size(), modal.size());
-                QCoreApplication::sendEvent(&modal, &layoutEvent);
+                if (qobject_cast<QMessageBox*>(&modal)) {
+                    // Windows 的消息框显示路径可能直接显示 HWND，此处只触发布局。
+                    modal.winId();
+                    QResizeEvent layoutEvent(modal.size(), modal.size());
+                    QCoreApplication::sendEvent(&modal, &layoutEvent);
+                } else {
+                    modal.show();
+                }
+                const HWND hwnd = reinterpret_cast<HWND>(modal.internalWinId());
                 const auto* header = modal.findChild<QFrame*>(QStringLiteral("hotaruModalHeader"));
                 RECT bounds{};
                 POINT client{};
                 const auto modalShot = modal.grab();
                 const bool headerFits = header && header->width() == modal.width() - 2;
                 const bool smooth = hasSmoothFrame(modalShot);
-                const bool rounded = hasNativeRoundedFrame(hwnd);
+                const bool rounded = hasNativeRoundedFrame(hwnd, modal.size() * modal.devicePixelRatioF());
                 const bool aligned = GetWindowRect(hwnd, &bounds) && ClientToScreen(hwnd, &client)
                     && client.x == bounds.left && client.y == bounds.top;
                 const bool valid = headerFits && !IsWindowVisible(hwnd) && smooth && rounded && aligned;
@@ -591,10 +721,9 @@ int runChromeAudit(bool windowsBackend)
             checkModalFrame(custom, "Windows 自绘弹窗的原生区域裁去四角", QStringLiteral("modal-custom"));
             const auto original = custom.size();
             custom.resize(original + QSize(36, 20));
-            QResizeEvent resized(custom.size(), original);
-            QCoreApplication::sendEvent(&custom, &resized);
             check("Windows 自绘弹窗缩放后仍保留四个圆角",
-                custom.size() != original && hasNativeRoundedFrame(reinterpret_cast<HWND>(custom.internalWinId())));
+                custom.size() != original && hasNativeRoundedFrame(reinterpret_cast<HWND>(custom.internalWinId()),
+                                                                    custom.size() * custom.devicePixelRatioF()));
             for (const bool launcher : {false, true}) {
                 QMenu menu(&dialog);
                 menu.setAttribute(Qt::WA_DontShowOnScreen);
@@ -602,12 +731,15 @@ int runChromeAudit(bool windowsBackend)
                     Theme::bindLauncherMenu(&menu);
                 else
                     Theme::bindMenu(&menu);
+                // Qt 可在排完菜单项之前先创建 HWND，第一次 Show 仍可能读到旧尺寸。
+                menu.resize(100, 30);
+                const HWND hwnd = reinterpret_cast<HWND>(menu.winId());
                 auto* action = menu.addAction(QStringLiteral("打开所在位置"));
                 menu.addSeparator();
                 menu.addAction(QStringLiteral("复制路径"));
+                menu.addAction(QStringLiteral("以管理员身份启动"));
                 menu.popup(dialog.mapToGlobal(QPoint(250, 80)));
                 menu.setActiveAction(action);
-                const HWND hwnd = reinterpret_cast<HWND>(menu.winId());
                 const auto row = menu.actionGeometry(action);
                 const QPixmap preview = menu.grab();
                 const QImage image = preview.toImage();
@@ -616,7 +748,7 @@ int runChromeAudit(bool windowsBackend)
                 const auto inset = image.pixelColor((row.topLeft() + QPoint(7, 5)) * scale);
                 const auto accent = launcher ? Theme::launcherColor("accent") : Theme::color("accent");
                 check(launcher ? "启动器右键菜单外缘和选中项都有圆角" : "标准菜单外缘和选中项都有圆角",
-                    !IsWindowVisible(hwnd) && hasNativeRoundedFrame(hwnd) && hasSmoothFrame(preview)
+                    !IsWindowVisible(hwnd) && hasNativeRoundedFrame(hwnd, menu.size() * scale) && hasSmoothFrame(preview)
                     && corner != accent && inset == accent);
                 check("Windows 菜单截图可保存", preview.save(shots + (launcher ? "/launcher-menu-" : "/base-menu-") + name + ".png"));
                 menu.hide();
@@ -1384,6 +1516,9 @@ int runConfigChecks()
 
 int runHotaruSettingsSelftest(const QStringList& args)
 {
+    const int popup = args.indexOf(QStringLiteral("--launcher-popup-audit"));
+    if (popup >= 0)
+        return runLauncherPopupAudit(args.value(popup + 1));
     if (args.contains(QStringLiteral("--settings-surface-audit")))
         return runSurfaceAudit(args);
     if (args.contains(QStringLiteral("--settings-chrome-only")))

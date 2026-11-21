@@ -33,7 +33,7 @@
 ## 快速开始
 
 1. 从 [最新发布](https://github.com/EienSakura/hotaru-launcher/releases/latest) 下载 Windows x64 安装包。
-2. 安装后按 `Alt+Space` 或点击托盘图标呼出启动器。
+2. 安装完成后，从开始菜单打开 Hotaru。按 `Alt+Space` 或点击托盘图标呼出启动器。
 3. 在空白格右键添加软件或文件夹，也可从搜索结果快捷固定。
 4. 点击齿轮进入「配置 → 外观」，调整主题、网格大小和打开面板时的页面策略。
 
