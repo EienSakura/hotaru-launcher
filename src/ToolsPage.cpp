@@ -289,8 +289,8 @@ ToolsPage::ToolsPage(QWidget* parent)
     : QWidget(parent)
 {
     auto* lay = new QVBoxLayout(this);
-    lay->setContentsMargins(12, 6, 4, 4);
-    lay->setSpacing(8);
+    lay->setContentsMargins(30, 20, 30, 15);
+    lay->setSpacing(11);
 
     auto* head = new QHBoxLayout;
     head->setSpacing(8);
@@ -317,23 +317,23 @@ ToolsPage::ToolsPage(QWidget* parent)
     });
 
     const char* const kTopBtnQss =
-        "QPushButton {"
+        "QPushButton, QToolButton {"
         "  background: @button;"
         "  border: 1px solid @borderHi;"
         "  color: @text;"
-        "  border-radius: 7px;"
+        "  border-radius: 9px;"
         "  font-size: 9pt;"
         "  font-weight: 500;"
         "  padding: 4px 12px;"
         "  min-height: 26px;"
         "}"
-        "QPushButton:hover { background: @buttonUp; border-color: @borderHiUp; }"
-        "QPushButton:pressed { background: @buttonDown; }"
+        "QPushButton:hover, QToolButton:hover { background: @hover; border-color: @accent; }"
+        "QPushButton:pressed, QToolButton:pressed { background: @pressed; }"
     ;
-    Theme::bind(refresh, kTopBtnQss);
-    Theme::bind(repoBtn, kTopBtnQss);
+    Theme::bindSettings(refresh, kTopBtnQss);
+    Theme::bindSettings(repoBtn, kTopBtnQss);
     // 出口那颗和它们同款：autoRaise 的淡箭头在深色页眉里就是"找不到退出按钮"（他 2026-10-18 的原话）
-    Theme::bind(m_back, kTopBtnQss);
+    Theme::bindSettings(m_back, kTopBtnQss);
 
     // 「一键下载全部」：把商店里这台机器还没装的那几颗一次排进那条「一次只飞一颗」的队列。
     // 为什么不摆到底下那行过滤里：这一颗管的范围是**整个商店**，跟着筛出来的那几张走，"全部"就名不副实。
@@ -345,7 +345,7 @@ ToolsPage::ToolsPage(QWidget* parent)
         "把商店里这台机器还没装的那几颗一次排上队 —— 还是一次只飞一颗，一颗落地才接下一颗。\n"
         "接口对不上的、条目用不了的那几颗不在里面。\n"
         "第一下一颗都不动，只把「排几颗 · 大约多少」摆出来；再按一次才真排队。"));
-    Theme::bind(m_bulk, kTopBtnQss);
+    Theme::bindSettings(m_bulk, kTopBtnQss);
     // 预留到两版标签里**最宽的那一版**：点下去只换字、不撑页眉那一排（他否过"一点就重新排"）。
     // 宽度拿 `sizeHint()` 量，不按"几个字 × 一个字宽"估 —— 本机 `windows` 平台实测
     // 「一键下载全部」比「确认这 12 颗」宽（前者六个纯汉字，后者夹了数字和空格），

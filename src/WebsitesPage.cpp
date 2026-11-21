@@ -1,10 +1,13 @@
 #include "WebsitesPage.h"
+#include "SettingsIcons.h"
+#include "SettingsControlStyle.h"
 
 #include "Theme.h"
 #include "Utils.h"
 #include "WebShortcuts.h"
 
 #include <QDialog>
+#include <QEvent>
 #include <QDialogButtonBox>
 #include <QFormLayout>
 #include <QHBoxLayout>
@@ -17,6 +20,7 @@
 #include <QFrame>
 #include <QListWidget>
 #include <QMessageBox>
+#include <QMenu>
 #include <QPushButton>
 #include <QRegularExpression>
 #include <QTimer>
@@ -34,12 +38,6 @@
 #include <functional>
 
 namespace {
-
-QColor colorForUrl(const QString& name, const QString& url)
-{
-    const size_t seed = qHash(name + url);
-    return QColor::fromHsv(int(seed % 360), 120, 180);
-}
 
 QStringList splitKeys(const QString& text)
 {
@@ -59,7 +57,9 @@ public:
         setCursor(Qt::PointingHandCursor);
         setMinimumWidth(300);
         setMinimumHeight(72);
-        setStyleSheet(QStringLiteral("QFrame{border:1px dashed palette(mid);border-radius:10px;padding:10px;background:palette(base);}QFrame:hover{border-color:palette(highlight);background:palette(alternate-base);}"));
+        setObjectName(QStringLiteral("settingsDrop"));
+        Theme::bindSettings(this, "QFrame#settingsDrop{border:1px dashed @line;border-radius:10px;background:@group;}"
+                                  "QFrame#settingsDrop:hover{border-color:@accent;background:@hover;}");
         m_dragTimer.setInterval(90);
         connect(&m_dragTimer, &QTimer::timeout, this, [this] {
             m_dragPhase = (m_dragPhase + 2) % 20;
@@ -138,17 +138,13 @@ bool entryDialog(QWidget* parent, WebEntry* e)
                                          : QStringLiteral("编辑快捷搜索"));
     dlg.setObjectName(QStringLiteral("quickSearchDialog"));
     dlg.setMinimumWidth(620);
-    Theme::bind(&dlg, "QDialog#quickSearchDialog{background:@window;} QLabel#quickTitle{color:@text;font-size:17pt;font-weight:600;} QLabel#quickHint,QLabel#quickError{color:@muted;} QLineEdit#quickEdit,QComboBox#quickType{background:@field;border:1px solid @border;border-radius:8px;padding:8px 10px;color:@text;} QLineEdit#quickEdit:focus,QComboBox#quickType:focus{border:1px solid @accent;} QPushButton#quickPrimary{background:@accent;color:@onAccent;border:1px solid @accent;border-radius:8px;padding:7px 18px;font-weight:600;} QPushButton#quickPrimary:hover{background:@accentUp;} QPushButton#quickPrimary:pressed{background:@accentDown;} QPushButton#quickSecondary{background:@button;color:@text;border:1px solid @border;border-radius:8px;padding:7px 18px;}");
     auto* lay = new QVBoxLayout(&dlg);
     lay->setContentsMargins(24, 22, 24, 20);
     lay->setSpacing(12);
-    auto* heading = new QLabel(e->name.isEmpty() ? QStringLiteral("新增快捷搜索") : QStringLiteral("编辑快捷搜索"), &dlg);
-    heading->setObjectName(QStringLiteral("quickTitle"));
-    lay->addWidget(heading);
     auto* form = new QFormLayout;
     auto* name = new QLineEdit(e->name, &dlg);
     auto* keys = new QLineEdit(e->keys.join(QStringLiteral(", ")), &dlg);
-    auto* type = new QComboBox(&dlg);
+    auto* type = new SettingsComboBox(&dlg);
     type->addItem(QStringLiteral("网页"), QStringLiteral("web"));
     type->addItem(QStringLiteral("应用或脚本"), QStringLiteral("app"));
     type->addItem(QStringLiteral("磁盘文件夹"), QStringLiteral("folder"));
@@ -169,7 +165,7 @@ bool entryDialog(QWidget* parent, WebEntry* e)
     auto* hint = new QLabel(
         QStringLiteral("搜索框只匹配第一个完整词，回车后直接打开目标。应用和文件夹不会修改源文件。"),
         &dlg);
-    hint->setObjectName(QStringLiteral("quickHint"));
+    hint->setObjectName(QStringLiteral("modalHint"));
     lay->addWidget(hint);
 
     auto* drop = new QuickSearchDropCard(&dlg);
@@ -177,7 +173,7 @@ bool entryDialog(QWidget* parent, WebEntry* e)
     auto* dropLay = new QHBoxLayout(drop);
     dropLay->setContentsMargins(14, 8, 14, 8);
     auto* dropText = new QLabel(QStringLiteral("拖入网页、程序、脚本或磁盘文件夹 · 拖入后自动填写目标"), drop);
-    dropText->setObjectName(QStringLiteral("quickHint"));
+    dropText->setObjectName(QStringLiteral("modalHint"));
     dropText->setWordWrap(true);
     dropLay->addWidget(dropText, 1);
     drop->dropped = [type, target, name, keys, dropText](const QList<QUrl>& urls) {
@@ -240,6 +236,7 @@ bool entryDialog(QWidget* parent, WebEntry* e)
     updateTargetUi();
     QObject::connect(btns, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
     QObject::connect(btns, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+    Theme::bindModal(&dlg);
     if (dlg.exec() != QDialog::Accepted)
         return false;
 
@@ -263,80 +260,61 @@ public:
         lay->setContentsMargins(12, 8, 12, 8);
         lay->setSpacing(12);
 
-        // 1. 图标 + 名字
-        auto* icon = new QLabel(this);
-        icon->setFixedSize(30, 30);
+        const bool folder = e.targetType == QLatin1String("folder");
+        const bool app = e.targetType == QLatin1String("app");
         const QString target = e.target.isEmpty() ? e.url : e.target;
-        icon->setPixmap(Utils::letterIcon(e.name, colorForUrl(e.name, target)).pixmap(30, 30));
-        icon->setScaledContents(true);
-        lay->addWidget(icon, 0, Qt::AlignVCenter);
+        lay->addWidget(new SettingsIconTile(folder ? SettingsGlyph::Folder
+            : app ? SettingsGlyph::Terminal : SettingsGlyph::Search, this));
 
-        auto* nameLabel = new QLabel(e.name, this);
-        nameLabel->setFixedWidth(130);
-        QFont f = nameLabel->font();
-        f.setBold(true);
-        f.setPointSize(f.pointSize() + 1);
-        nameLabel->setFont(f);
-        lay->addWidget(nameLabel, 0, Qt::AlignVCenter);
-
-        // 2. 触发关键字 Tags
-        auto* keysWidget = new QWidget(this);
-        auto* keysLay = new QHBoxLayout(keysWidget);
-        keysLay->setContentsMargins(0, 0, 0, 0);
-        keysLay->setSpacing(5);
-        for (const QString& k : e.keys) {
-            auto* tag = new QLabel(k, keysWidget);
-            Theme::bind(tag,
-                "background: @tintCyan; "
-                "color: @cyan; "
-                "border: 1px solid @tintCyanLine; "
-                "border-radius: 4px; "
-                "padding: 1px 6px; "
-                "font-family: Consolas, 'Courier New', monospace; "
-                "font-size: 9pt; "
-                "font-weight: 600;");
-            keysLay->addWidget(tag);
+        auto* labels = new QVBoxLayout;
+        labels->setSpacing(3);
+        auto* name = new QLabel(e.name, this);
+        name->setObjectName(QStringLiteral("settingsRowTitle"));
+        name->setTextFormat(Qt::PlainText);
+        name->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+        name->setToolTip(e.name);
+        labels->addWidget(name);
+        const QString type = folder ? QStringLiteral("磁盘文件夹")
+            : app ? QStringLiteral("应用或脚本") : QStringLiteral("网页");
+        auto* description = new QLabel(QStringLiteral("%1 · %2").arg(type, target), this);
+        description->setObjectName(QStringLiteral("muted"));
+        description->setTextFormat(Qt::PlainText);
+        description->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+        description->setToolTip(target);
+        labels->addWidget(description);
+        if (!e.searchUrl.isEmpty() && !folder && !app) {
+            auto* compatibility = new QLabel(QStringLiteral("兼容模板 · %1").arg(e.searchUrl), this);
+            compatibility->setObjectName(QStringLiteral("muted"));
+            compatibility->setTextFormat(Qt::PlainText);
+            compatibility->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+            compatibility->setToolTip(e.searchUrl);
+            labels->addWidget(compatibility);
         }
-        keysLay->addStretch(1);
-        keysWidget->setFixedWidth(150);
-        lay->addWidget(keysWidget, 0, Qt::AlignVCenter);
+        lay->addLayout(labels, 1);
 
-        // 3. 目标网址与搜索说明
-        auto* urlCol = new QVBoxLayout;
-        urlCol->setSpacing(2);
-        urlCol->setContentsMargins(0, 0, 0, 0);
-
-        const QString typeLabel = e.targetType == QLatin1String("folder") ? QStringLiteral("磁盘文件夹")
-            : e.targetType == QLatin1String("app") ? QStringLiteral("应用或脚本") : QStringLiteral("网页");
-        auto* urlLabel = new QLabel(QStringLiteral("%1 · %2").arg(typeLabel, target), this);
-        Theme::bind(urlLabel, "color: @text; font-size: 9.5pt;");
-        urlLabel->setToolTip(e.url);
-        urlCol->addWidget(urlLabel);
-
-        if (!e.searchUrl.isEmpty() && e.targetType == QLatin1String("web")) {
-            auto* searchLabel = new QLabel(QStringLiteral("兼容模板: %1").arg(e.searchUrl), this);
-            Theme::bind(searchLabel, "color: @muted; font-size: 8.5pt;");
-            searchLabel->setToolTip(e.searchUrl);
-            urlCol->addWidget(searchLabel);
-        }
-        lay->addLayout(urlCol, 1);
-
-        // 4. 操作按钮（编辑 / 删除）
-        auto* editBtn = new QPushButton(QStringLiteral("编辑"), this);
-        editBtn->setObjectName(QStringLiteral("rowBtn"));
-        editBtn->setCursor(Qt::PointingHandCursor);
-        connect(editBtn, &QPushButton::clicked, page, [page, index] {
-            page->editEntryAt(index);
-        });
-        lay->addWidget(editBtn, 0, Qt::AlignVCenter);
-
-        auto* delBtn = new QPushButton(QStringLiteral("删除"), this);
-        delBtn->setObjectName(QStringLiteral("rowBtn"));
-        delBtn->setCursor(Qt::PointingHandCursor);
-        connect(delBtn, &QPushButton::clicked, page, [page, index] {
-            page->removeEntryAt(index);
-        });
-        lay->addWidget(delBtn, 0, Qt::AlignVCenter);
+        const QString keys = e.keys.join(QStringLiteral(" · "));
+        auto* keyBadge = new QLabel(keys, this);
+        keyBadge->setObjectName(QStringLiteral("settingsBadge"));
+        keyBadge->setTextFormat(Qt::PlainText);
+        keyBadge->setMaximumWidth(140);
+        keyBadge->setToolTip(keys);
+        keyBadge->setVisible(!keys.isEmpty());
+        lay->addWidget(keyBadge, 0, Qt::AlignVCenter);
+        auto* edit = new QPushButton(QStringLiteral("编辑"), this);
+        edit->setAccessibleName(QStringLiteral("编辑 %1").arg(e.name));
+        connect(edit, &QPushButton::clicked, this, [page, index] { page->editEntryAt(index); });
+        lay->addWidget(edit);
+        auto* more = new QPushButton(this);
+        more->setObjectName(QStringLiteral("quickMore"));
+        more->setIcon(settingsIcon(SettingsGlyph::More, QColor(SettingsPalette::current().text)));
+        more->setIconSize(QSize(16, 16));
+        more->setFixedWidth(34);
+        more->setAccessibleName(QStringLiteral("%1的更多操作").arg(e.name));
+        auto* menu = new QMenu(more);
+        Theme::bindMenu(menu);
+        menu->addAction(QStringLiteral("删除"), page, [page, index] { page->removeEntryAt(index); });
+        more->setMenu(menu);
+        lay->addWidget(more);
     }
 };
 
@@ -345,7 +323,7 @@ public:
 WebsitesPage::WebsitesPage(QWidget* parent) : QWidget(parent)
 {
     auto* root = new QVBoxLayout(this);
-    root->setContentsMargins(16, 14, 16, 14);
+    root->setContentsMargins(30, 20, 30, 18);
     root->setSpacing(10);
 
     // 顶栏：标题说明与右上角新增按钮
@@ -369,61 +347,66 @@ WebsitesPage::WebsitesPage(QWidget* parent) : QWidget(parent)
     addButton->setCursor(Qt::PointingHandCursor);
     addButton->setMinimumHeight(30);
     addButton->setMinimumWidth(124);
-    Theme::bind(addButton, "QPushButton#quickAddButton{background:@button;color:@text;border:1px solid @borderHi;border-radius:6px;padding:5px 10px;}QPushButton#quickAddButton:hover{background:@buttonUp;border-color:@borderHiUp;}QPushButton#quickAddButton:pressed{background:@buttonDown;}");
+    addButton->setProperty("settingsPrimary", true);
+    addButton->setIcon(settingsIcon(SettingsGlyph::Plus, QColor(SettingsPalette::current().onPrimary)));
     connect(addButton, &QPushButton::clicked, this, &WebsitesPage::addEntry);
     topRow->addWidget(addButton, 0, Qt::AlignVCenter);
     root->addLayout(topRow);
 
-    // 表头栏
-    auto* headRow = new QHBoxLayout;
-    headRow->setContentsMargins(16, 4, 16, 2);
-    headRow->setSpacing(12);
-
-    auto* h1 = new QLabel(QStringLiteral("显示名称"), this);
-    h1->setObjectName(QStringLiteral("colHead"));
-    h1->setFixedWidth(172); // 30+130+12
-    auto* h2 = new QLabel(QStringLiteral("触发关键字"), this);
-    h2->setObjectName(QStringLiteral("colHead"));
-    h2->setFixedWidth(150);
-    auto* h3 = new QLabel(QStringLiteral("目标类型 / 路径"), this);
-    h3->setObjectName(QStringLiteral("colHead"));
-    auto* h4 = new QLabel(QStringLiteral("操作"), this);
-    h4->setObjectName(QStringLiteral("colHead"));
-    h4->setFixedWidth(90);
-    h4->setAlignment(Qt::AlignCenter);
-
-    headRow->addWidget(h1);
-    headRow->addWidget(h2);
-    headRow->addWidget(h3, 1);
-    headRow->addWidget(h4);
-    root->addLayout(headRow);
+    auto* listTitle = new QLabel(QStringLiteral("搜索入口"), this);
+    listTitle->setObjectName(QStringLiteral("settingsRowTitle"));
+    root->addWidget(listTitle);
 
     // 列表主体
     m_list = new QListWidget(this);
     m_list->setObjectName(QStringLiteral("webList"));
-    m_list->setSpacing(3);
+    m_list->setSpacing(0);
+    m_list->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     root->addWidget(m_list, 1);
+    root->addStretch(1);
 
     connect(m_list, &QListWidget::itemDoubleClicked, this, [this](QListWidgetItem* it) {
-        if (it)
+        if (it && it->data(Qt::UserRole).isValid())
             editEntryAt(it->data(Qt::UserRole).toInt());
     });
 
     rebuild();
 }
 
+void WebsitesPage::changeEvent(QEvent* event)
+{
+    QWidget::changeEvent(event);
+    if (event->type() != QEvent::ThemeChange)
+        return;
+    const auto colors = SettingsPalette::current();
+    if (auto* add = findChild<QPushButton*>(QStringLiteral("quickAddButton")))
+        add->setIcon(settingsIcon(SettingsGlyph::Plus, QColor(colors.onPrimary)));
+    const auto moreIcon = settingsIcon(SettingsGlyph::More, QColor(colors.text));
+    for (auto* more : findChildren<QPushButton*>(QStringLiteral("quickMore")))
+        more->setIcon(moreIcon);
+}
+
 void WebsitesPage::rebuild()
 {
     m_list->clear();
     const auto webs = WebShortcuts::loadWebs();
+    int height = 2;
+    if (webs.isEmpty()) {
+        auto* placeholder = new QListWidgetItem(QStringLiteral("暂无快捷搜索。可以添加网页、应用、脚本或文件夹。"), m_list);
+        placeholder->setFlags(Qt::NoItemFlags);
+        placeholder->setSizeHint(QSize(0, 44));
+    }
     for (int i = 0; i < webs.size(); ++i) {
         const WebEntry& e = webs[i];
+        const int rowHeight = e.searchUrl.isEmpty() ? 58 : 74;
+        height += rowHeight;
         auto* it = new QListWidgetItem(m_list);
         it->setData(Qt::UserRole, i);
-        it->setSizeHint(QSize(0, e.searchUrl.isEmpty() ? 50 : 62));
+        it->setSizeHint(QSize(0, rowHeight));
         auto* w = new WebRowWidget(e, i, this, m_list);
         m_list->setItemWidget(it, w);
     }
+    m_list->setMaximumHeight(webs.isEmpty() ? 48 : height);
 }
 
 void WebsitesPage::editEntryNamed(const QString& name)

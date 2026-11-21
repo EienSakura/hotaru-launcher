@@ -148,14 +148,19 @@ void LauncherGrid::drawItem(QPainter& p,int index,const QRectF& area,bool floati
     p.save();p.setRenderHint(QPainter::SmoothPixmapTransform);
     if (floating) p.setOpacity(.92);
     if (floating || index==m_hovered || (hasFocus() && index==m_selected)) {
-        p.setPen(Qt::NoPen);p.setBrush(Theme::launcherColor("rowSel"));p.drawRoundedRect(area.adjusted(3,2,-3,-2),7,7);
+        p.setPen(!floating && hasFocus() && index==m_selected
+                     ? QPen(Theme::launcherColor("accent"), 1) : QPen(Qt::NoPen));
+        p.setBrush(Theme::launcherColor("rowSel"));
+        p.drawRoundedRect(area.adjusted(3,2,-3,-2),10,10);
     }
     const int iconSize=qBound(16,int(area.height())-34,48);
     const int top=qMax(2,(int(area.height())-iconSize-28)/2);
     const QRect icon(int(area.center().x())-iconSize/2,int(area.y())+top,iconSize,iconSize);
     const auto& item=m_items[index];
     if (item.group) {
-        p.setPen(Qt::NoPen);p.setBrush(Theme::launcherColor("rowSel"));p.drawRoundedRect(icon,10,10);
+        p.setPen(QPen(Theme::launcherColor("border"), 1));
+        p.setBrush(Theme::launcherColor("rowSel"));
+        p.drawRoundedRect(icon.adjusted(0,0,-1,-1),10,10);
         const int small=(iconSize-10)/2;
         for (int i=0;i<item.covers.size() && i<4;++i)
             item.covers[i].paint(&p,QRect(icon.x()+4+(i%2)*(small+2),icon.y()+4+(i/2)*(small+2),small,small));
@@ -195,7 +200,9 @@ void LauncherGrid::paintEvent(QPaintEvent*)
         drawItem(p,i,area);
     }
     if (m_mergeReady && m_mergeTarget>=0 && !m_snapshot) {
-        p.setBrush(QColor(70,140,230,65));p.setPen(QPen(Theme::launcherColor("accent"),2));
+        auto fill = Theme::launcherColor("accent");
+        fill.setAlpha(65);
+        p.setBrush(fill);p.setPen(QPen(Theme::launcherColor("accent"),2));
         p.drawRoundedRect(itemRect(m_mergeTarget).adjusted(5,4,-5,-4),12,12);
         p.drawText(itemRect(m_mergeTarget).adjusted(0,0,0,-2),Qt::AlignBottom|Qt::AlignHCenter,QStringLiteral("松开加入文件夹"));
     }
@@ -344,7 +351,7 @@ void LauncherGrid::contextMenuEvent(QContextMenuEvent* e)
     const auto cell=cellAt(e->pos());if (cell.x()<0) return;
     const int index=occupant(cell);
     if (index>=0) {if (m_items[index].app.enabled) emit itemMenuRequested(m_items[index].app.id,e->globalPos());return;}
-    QMenu menu(this);Theme::bindMenu(&menu);
+    QMenu menu(this);Theme::bindLauncherMenu(&menu);
     auto* software=menu.addAction(QStringLiteral("添加程序或脚本…"));
     auto* diskFolder=menu.addAction(QStringLiteral("添加磁盘文件夹…"));
     QAction* panelFolder=nullptr;

@@ -9,6 +9,7 @@ class QToolButton;
 class QTimer;
 class ToolsPage;
 namespace HotaruPluginRepository { class Client; }
+inline constexpr char kSettingsHotkeyApplied[] = "hotaruSettingsHotkeyApplied";
 
 // ltool 配置页面（搜索框右侧齿轮打开）：左侧菜单 + 右侧内容
 //   快捷搜索 / 插件商店 / 配置 / 关于 —— 只有四行。
@@ -55,6 +56,9 @@ private:
 
 protected:
     void showEvent(QShowEvent* e) override;
+    void resizeEvent(QResizeEvent* e) override;
+    void paintEvent(QPaintEvent* e) override;
+    bool nativeEvent(const QByteArray& eventType, void* message, qintptr* result) override;
     // 配置页拨「夜间/日间」那颗时，Theme::setMode() 会给每个顶层窗口发一次 ThemeChange；
     // 这一页的样式表是挂在窗口上的（qApp 那份传导不下来），所以在这儿原地重算。
     bool event(QEvent* e) override;

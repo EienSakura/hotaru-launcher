@@ -4,6 +4,7 @@
 #include <QString>
 
 class QApplication;
+class QDialog;
 class QWidget;
 
 // 一套颜色、两个模式（夜间 / 日间）。
@@ -37,12 +38,15 @@ void applyToApp(QApplication& app);
 // ThemeChange 自动重挂。为什么要这一层：样式表挂在各个控件自己身上，改 qApp 传导不下去；
 // 每个页各写一份 event() 分支又会漏（漏的那半在切完模式后还是老颜色，不说真话）。
 void bind(QWidget* w, const char* qssWithTokens);
+void bindSettings(QWidget* w, const char* qssWithTokens);
 // 菜单专用：Qt6 的 windows11/windowsvista 风格画弹层用的是系统浅底、不读调色板，
 // 所以菜单的样式表必须挂在菜单自己身上；挂在启动时一次、活一整天的菜单（托盘那个）
 // 光靠这一句拿不到新底色，得走 bind 才能跟着模式重挂。
 void bindMenu(QWidget* menu);
 // 标准提示/输入框和固定项属性使用基础配色，不继承启动器皮肤。
 void bindDialog(QWidget* dialog);
+// 为 Hotaru 自建表单和附属窗口包一层标题栏，继续使用原对话框结果及内容布局。
+void bindModal(QDialog* dialog, bool resizable = false);
 
 const char* name(Mode m);           // "夜间" / "日间"
 QString token(const char* role);    // 一个角色的颜色字面量，给拼 QSS 用

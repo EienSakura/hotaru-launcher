@@ -4,7 +4,7 @@
 
 ## 技术栈与模块
 
-当前开发目标为 Windows x64，使用 C++20、Qt 6.10.2、CMake 3.24及以上版本和Visual Studio 2022。Qt、libarchive和bit7z通过 `vcpkg.json` 清单管理；版本信息从 `ltool.iss` 读取，当前发布版本为 `1.0.2`。
+当前开发目标为 Windows x64，使用 C++20、Qt 6.10.2、CMake 3.24 及以上版本和 Visual Studio 2022。Qt、libarchive 和 bit7z 通过 `vcpkg.json` 清单管理。当前源码版本为 `1.1.0`，版本信息从 `ltool.iss` 读取。
 
 | 模块 | 职责 |
 | --- | --- |
@@ -121,6 +121,17 @@ $pluginVersion = '1.0.0'
 
 `HotaruDev.exe` 使用独立的单实例通道、`data-dev`、`ltool-plugins-dev`、`HotaruDev` 登录项与默认 **Ctrl+Alt+H**，不迁移旧数据，不写资源管理器菜单。开发版测试数据覆盖变量为 `HOTARU_DEV_DATA_DIR`。正式版默认 `HOTARU_DEV_BUILD=OFF`，原来的构建和安装器用法不变。参见[实机测试清单](development-testing.md)。
 
+### 更新应用图标
+
+原图位于 `resources/branding/hotaru-icon.png`。在仓库根目录构建并运行图标工具。
+
+```powershell
+cmake --build build --config Release --target genicon
+./build/Release/genicon.exe resources/branding/hotaru-icon.png .
+```
+
+工具会生成四个 Qt PNG、文档用的 256 像素 PNG，以及程序和安装器共用的 `resources/ltool.ico`。派生图标均使用透明圆角，README 引用 128 像素 PNG。生成后重新构建 `ltool`。
+
 ## 工具插件
 
 Hotaru 新产出的插件分发包文件名统一使用小写 `hotaru-plugin-` 前缀，例如 `hotaru-plugin-lan-core-1.0.0-x64.zip`。打包时检查此前缀，导入时按包内 DLL 元数据判断 ID、接口版本和依赖。此规则不改动 DLL 名、包内 ID、历史发布附件、SDK、主题或宿主包。
@@ -213,4 +224,4 @@ CI 从 `tools/upstream-base.txt` 下载固定上游提交，仅用于插件版�
 
 ## 官方插件仓库
 
-仓库目录、发布、验签和本地导入说明见 [Hotaru 插件仓库](plugin-repository.md)。正式版发布后可运行 `python tools/postrelease_check.py --tag v1.0.2` 核对公开安装包摘要。
+仓库目录、发布、验签和本地导入说明见 [Hotaru 插件仓库](plugin-repository.md)。正式版发布后可运行 `python tools/postrelease_check.py --tag v1.1.0` 核对公开安装包摘要。

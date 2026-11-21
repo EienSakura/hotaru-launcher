@@ -213,6 +213,8 @@ def self_check():
                     return main()
 
             eq(generate(), 0, '默认发布不依赖插件资产')
+            with open(output, encoding='utf-8') as f:
+                eq('重点是 **验证发布范围**' in f.read(), True, '发布重点使用提交描述')
             with open(os.path.join(installer, 'sha256.txt'), encoding='utf-8') as f:
                 names = [line.split('  ', 1)[1].strip() for line in f]
             eq(names, [setup], '即使已有 SDK、清单和 DLL，默认校验表也只包含当前安装包')
@@ -238,7 +240,7 @@ def self_check():
             with zipfile.ZipFile(theme, 'w') as archive:
                 archive.writestr('other.json', '{}')
             eq(generate(['--theme-file', theme]), 1, '缺主题清单时拒绝发布')
-    print('NOTES_CHECK_TOTAL=19')
+    print('NOTES_CHECK_TOTAL=20')
     print('NOTES_CHECK_BAD=%d' % len(bad))
     for b in bad:
         print('FAIL %s' % b)
@@ -277,6 +279,7 @@ def main():
     L.append('')
     keys = []
     for subject, _ in cs[-3:][::-1]:          # 最近三笔当"本次重点"
+        subject = re.sub(r'^[a-z][a-z-]*(?:\([^()]+\))?!?:\s*', '', subject)
         # 取标题里第一个短句当"重点"。但有的标题写成「1.0.3：检查更新不再打 api…」——
         # 冒号前只是个版本号，拿它当重点等于什么都没说（本机 dry-run 第一次就撞上），
         # 所以太短或整个是数字就往后挪一段。
@@ -288,7 +291,7 @@ def main():
     lead = '🎉 欢迎使用 **Hotaru %s**！本次共 **%d 笔改动**' % (ver, len(cs))
     if keys:
         lead += '，重点是 ' + '、'.join('**%s**' % k for k in keys)
-    lead += '。下面每一节是一笔提交，原因和实测数字都在里面。'
+    lead += '。'
     L.append(lead)
     L.append('')
     L.append('---')
@@ -376,8 +379,9 @@ def main():
     L.append('')
     L.append('一共 **%d 个文件**。校验：`Get-FileHash <文件> -Algorithm SHA256`，或下 `sha256.txt` 对整批。' % len(full))
     L.append('')
-    L.append('当前插件商店沿用上游 ltool，尚未测试与 Hotaru 的适配情况，需自行适配。'
-             '默认安装包不含插件，已有插件和配置不会被清空。')
+    L.append('在「设置 → 插件 → 官方仓库」获取 Hotaru 插件。'
+             'ltool 兼容插件使用上游渠道，需自行验证兼容性。'
+             '工具插件按需安装，覆盖安装会保留已有插件和配置。')
     if themes:
         L.append('主题 ZIP 是独立可选附件，不包含在安装器和源码中。主题素材权利归原作者，源码的 Apache-2.0 许可证不涵盖第三方素材。')
     if include_plugins:

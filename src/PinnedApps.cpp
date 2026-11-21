@@ -10,6 +10,7 @@
 #include <QLineEdit>
 #include <QSpinBox>
 #include <QMessageBox>
+#include <QPushButton>
 
 #include <QDir>
 #include <QFile>
@@ -501,9 +502,12 @@ bool editProperties(const QString& id, QWidget* parent, QString* error)
     auto found=std::find_if(cfg.pinnedApps.begin(),cfg.pinnedApps.end(),[&](const auto& a){return a.id==id;});
     if (found==cfg.pinnedApps.end()) return false;
     QDialog dialog(parent); dialog.setWindowTitle(QStringLiteral("固定项属性"));
-    Theme::bindDialog(&dialog);
+    dialog.setObjectName(QStringLiteral("pinPropertiesDialog"));
     dialog.setMinimumWidth(540);
     auto* form=new QFormLayout(&dialog);
+    form->setContentsMargins(20, 16, 20, 18);
+    form->setHorizontalSpacing(14);
+    form->setVerticalSpacing(10);
     const auto field=[&](const QString& name,const QString& value) {
         auto* input=new QLineEdit(value,&dialog); form->addRow(name,input); return input;
     };
@@ -519,6 +523,8 @@ bool editProperties(const QString& id, QWidget* parent, QString* error)
     form->addRow(QStringLiteral("页（从 1 开始）"),page);
     form->addRow(QStringLiteral("页内行（从 1 开始）"),row);form->addRow(QStringLiteral("列（从 1 开始）"),column);
     auto* buttons=new QDialogButtonBox(QDialogButtonBox::Ok|QDialogButtonBox::Cancel,&dialog);
+    buttons->button(QDialogButtonBox::Ok)->setText(QStringLiteral("保存"));
+    buttons->button(QDialogButtonBox::Cancel)->setText(QStringLiteral("取消"));
     form->addRow(buttons);QObject::connect(buttons,&QDialogButtonBox::rejected,&dialog,&QDialog::reject);
     bool saved=false;
     QObject::connect(buttons,&QDialogButtonBox::accepted,&dialog,[&] {
@@ -534,6 +540,7 @@ bool editProperties(const QString& id, QWidget* parent, QString* error)
         if (!saveConfig(updated,&detail)) { QMessageBox::warning(&dialog,QStringLiteral("无法保存"),detail);return; }
         saved=true;dialog.accept();
     });
+    Theme::bindModal(&dialog);
     dialog.exec();
     Q_UNUSED(error)
     return saved;

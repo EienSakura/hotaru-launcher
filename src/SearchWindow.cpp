@@ -137,7 +137,7 @@ protected:
         else if (e->pos().x()>=118) request(count,true);
     }
     void contextMenuEvent(QContextMenuEvent* e) override {
-        QMenu menu(this);Theme::bindMenu(&menu);
+        QMenu menu(this);Theme::bindLauncherMenu(&menu);
         auto* remove=menu.addAction(QStringLiteral("删除当前页"));remove->setEnabled(count>1 && bool(removePage));
         if (menu.exec(e->globalPos())==remove && removePage) removePage();
     }
@@ -152,7 +152,7 @@ constexpr int kWindowWidth = 980;
 constexpr int kRowHeight = 54;
 constexpr int kClipboardRowPadding = 6;
 
-QFont clipboardMetaFont(QFont font)
+QFont resultSubtitleFont(QFont font)
 {
     font.setPointSizeF(8.5);
     font.setBold(false);
@@ -183,7 +183,23 @@ QColor colorForKind(const QString& key)
 
 class ResultDelegate : public QStyledItemDelegate {
 public:
-    explicit ResultDelegate(SearchWindow* w) : QStyledItemDelegate(w), m_w(w) {}
+    explicit ResultDelegate(SearchWindow* w, QListWidget* view)
+        : QStyledItemDelegate(view), m_w(w), m_view(view) {}
+
+    void setActionHover(const QModelIndex& index = {}, bool pin = false, const QString& hint = {})
+    {
+        m_view->viewport()->setToolTip(hint);
+        if (m_hoverIndex == index && m_hoverPin == pin)
+            return;
+        const QModelIndex previous = m_hoverIndex;
+        m_hoverIndex = index;
+        m_hoverPin = pin;
+        m_view->viewport()->setCursor(index.isValid() ? Qt::PointingHandCursor : Qt::ArrowCursor);
+        if (previous.isValid())
+            m_view->update(previous);
+        if (index.isValid() && index != previous)
+            m_view->update(index);
+    }
 
     void paint(QPainter* p, const QStyleOptionViewItem& opt,
                const QModelIndex& index) const override
@@ -214,13 +230,22 @@ public:
             p->fillPath(path, Theme::launcherColor("rowSel"));
         }
 
-        if (actionWidth && (opt.state & (QStyle::State_MouseOver|QStyle::State_Selected))) {
-            const QRect folder=actionRect(opt.rect,false);
-            drawGlyph(*p,QRectF(folder.center().x()-9,folder.center().y()-9,18,18),ActionGlyph::Folder);
+        const bool actionHovered = index == m_hoverIndex;
+        if (actionWidth && (actionHovered || (opt.state & (QStyle::State_MouseOver | QStyle::State_Selected)))) {
+            const auto drawAction = [&](bool pin, ActionGlyph glyph) {
+                const auto button = actionRect(opt.rect, pin);
+                if (actionHovered && pin == m_hoverPin) {
+                    auto background = Theme::launcherColor("text");
+                    background.setAlpha(38);
+                    QPainterPath shape;
+                    shape.addRoundedRect(button.adjusted(2, 2, -2, -2), 8, 8);
+                    p->fillPath(shape, background);
+                }
+                drawGlyph(*p, QRectF(button.center().x() - 9, button.center().y() - 9, 18, 18), glyph);
+            };
+            drawAction(false, ActionGlyph::Folder);
             if (m_w->canPinResult(r)) {
-                const auto pin=actionRect(opt.rect,true);
-                drawGlyph(*p,QRectF(pin.center().x()-9,pin.center().y()-9,18,18),
-                    PinnedApps::isPinned(m_w->resultPinnedApp(r))?ActionGlyph::Check:ActionGlyph::Pin);
+                drawAction(true, PinnedApps::isPinned(m_w->resultPinnedApp(r)) ? ActionGlyph::Check : ActionGlyph::Pin);
             }
         }
 
@@ -242,7 +267,7 @@ public:
         p->setPen(Theme::launcherColor(r.actionable ? "text" : "dim"));
         const QFontMetrics tfm(f);
         if (isClipboardEntry(r.target)) {
-            const auto metaFont = clipboardMetaFont(opt.font);
+            const auto metaFont = resultSubtitleFont(opt.font);
             const QFontMetrics metaMetrics(metaFont);
             const int textX = rr.left() + 48;
             const int textWidth = qMax(1, rr.width() - 60);
@@ -279,18 +304,21 @@ public:
             p->restore();
             return;
         }
-        p->drawText(QRect(rr.left() + 48, rr.top() + 6, rr.width() - 58-actionWidth, 20),
-                    Qt::AlignVCenter,
-                    tfm.elidedText(r.title, Qt::ElideRight, rr.width() - 58-actionWidth));
-
-        f.setBold(false);
-        f.setPointSizeF(8.5);
-        p->setFont(f);
-        p->setPen(Theme::launcherColor("muted"));
-        const QFontMetrics sfm(f);
-        p->drawText(QRect(rr.left() + 48, rr.bottom() - 18, rr.width() - 58-actionWidth, 16),
-                    Qt::AlignVCenter,
-                    sfm.elidedText(r.subtitle, Qt::ElideMiddle, rr.width() - 58-actionWidth));
+        const auto subtitleFont = resultSubtitleFont(opt.font);
+        const QFontMetrics subtitleMetrics(subtitleFont);
+        const int textWidth = qMax(1, rr.width() - 58 - actionWidth);
+        constexpr int lineGap = 2;
+        const int height = tfm.height() + (r.subtitle.isEmpty() ? 0 : lineGap + subtitleMetrics.height());
+        const int top = rr.top() + qMax(0, (rr.height() - height) / 2);
+        const int left = rr.left() + 48;
+        p->drawText(QRect(left, top, textWidth, tfm.height()), Qt::AlignVCenter,
+                    tfm.elidedText(r.title, Qt::ElideRight, textWidth));
+        if (!r.subtitle.isEmpty()) {
+            p->setFont(subtitleFont);
+            p->setPen(Theme::launcherColor("muted"));
+            p->drawText(QRect(left, top + tfm.height() + lineGap, textWidth, subtitleMetrics.height()),
+                        Qt::AlignVCenter, subtitleMetrics.elidedText(r.subtitle, Qt::ElideMiddle, textWidth));
+        }
         p->restore();
     }
 
@@ -306,11 +334,14 @@ public:
         titleFont.setBold(true);
         // 两行内容之外始终为来源和时间留一行，避免缩放后底部被裁掉。
         return {0, qMax(kRowHeight, 2 * QFontMetrics(titleFont).height() +
-                        QFontMetrics(clipboardMetaFont(opt.font)).height() + 2 + 2 * kClipboardRowPadding)};
+                        QFontMetrics(resultSubtitleFont(opt.font)).height() + 2 + 2 * kClipboardRowPadding)};
     }
 
 private:
     SearchWindow* m_w;
+    QListWidget* m_view;
+    QPersistentModelIndex m_hoverIndex;
+    bool m_hoverPin = false;
 };
 
 // 全角→半角：中文输入法在"全角"下打出来的是 ＱＱ（U+FF31），和索引里 ASCII 的 "qq"
@@ -449,7 +480,11 @@ void SearchWindow::buildUi()
     inputLay->addWidget(m_input, 1);
     m_list = new QListWidget(this);
     m_list->setObjectName(QStringLiteral("list"));
-    m_list->setItemDelegate(new ResultDelegate(this));
+    auto* results = new ResultDelegate(this, m_list);
+    m_list->setItemDelegate(results);
+    connect(m_list->verticalScrollBar(), &QScrollBar::valueChanged, results, [results] {
+        results->setActionHover();
+    });
     m_list->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     m_list->setSelectionMode(QAbstractItemView::SingleSelection);
     m_list->setMouseTracking(true);
@@ -673,7 +708,11 @@ void SearchWindow::openSettings()
         auto* dlg=new SettingsDialog(nullptr);m_settingsDlg=dlg;
         dlg->setAttribute(Qt::WA_DeleteOnClose);
         connect(dlg,&SettingsDialog::rescanRequested,this,&SearchWindow::rescan);
-        connect(dlg,&SettingsDialog::hotkeyChanged,this,&SearchWindow::hotkeyChanged);
+        connect(dlg, &SettingsDialog::hotkeyChanged, this, [this, dlg](const QString& sequence) {
+            setProperty(kSettingsHotkeyApplied, false);
+            emit hotkeyChanged(sequence);
+            dlg->setProperty(kSettingsHotkeyApplied, property(kSettingsHotkeyApplied));
+        });
         connect(dlg,&SettingsDialog::hotkeyCaptureActive,this,&SearchWindow::hotkeyCaptureActive);
         connect(dlg,&QObject::destroyed,this,[this] {m_settingsOpen=false;if (!m_quitting) refreshLauncher();});
         dlg->openAt(2,1);
@@ -1144,16 +1183,12 @@ bool SearchWindow::promptRename(const QString& initial, bool isGroup, QString* r
     dialog.setWindowTitle(isGroup ? QStringLiteral("重命名面板文件夹") : QStringLiteral("重命名固定项"));
     dialog.setMinimumWidth(500);
     dialog.setObjectName(QStringLiteral("renameDialog"));
-    Theme::bind(&dialog, "QDialog#renameDialog{background:@window;} QLabel#renameTitle{color:@text;font-size:17pt;font-weight:600;} QLabel#renameHint,QLabel#renameError{color:@muted;} QLineEdit#renameEdit{background:@edit;background-color:@edit;border:1px solid @line;border-radius:8px;padding:8px 10px;font-size:12pt;color:@editText;} QLineEdit#renameEdit:focus{border:1px solid @accent;}");
     auto* layout=new QVBoxLayout(&dialog);
     layout->setContentsMargins(22,20,22,18);
-    auto* heading=new QLabel(isGroup ? QStringLiteral("重命名面板文件夹") : QStringLiteral("重命名固定项"),&dialog);
-    heading->setObjectName(QStringLiteral("renameTitle"));
-    layout->addWidget(heading);
     auto* hint=new QLabel(QStringLiteral("只修改面板显示名，不修改源文件或磁盘目录。"),&dialog);
-    hint->setObjectName(QStringLiteral("renameHint"));hint->setWordWrap(true);layout->addWidget(hint);
+    hint->setObjectName(QStringLiteral("modalHint"));hint->setWordWrap(true);layout->addWidget(hint);
     auto* edit=new QLineEdit(initial,&dialog);edit->setObjectName(QStringLiteral("renameEdit"));edit->setMinimumHeight(44);edit->selectAll();layout->addWidget(edit);
-    auto* errorHint=new QLabel(&dialog);errorHint->setObjectName(QStringLiteral("renameError"));layout->addWidget(errorHint);
+    auto* errorHint=new QLabel(&dialog);errorHint->setObjectName(QStringLiteral("modalError"));layout->addWidget(errorHint);
     auto* buttons=new QDialogButtonBox(QDialogButtonBox::Ok|QDialogButtonBox::Cancel,&dialog);layout->addWidget(buttons);
     auto* ok=buttons->button(QDialogButtonBox::Ok);
     ok->setObjectName(QStringLiteral("primary"));
@@ -1162,14 +1197,13 @@ bool SearchWindow::promptRename(const QString& initial, bool isGroup, QString* r
     cancelButton->setObjectName(QStringLiteral("secondary"));
     cancelButton->setText(QStringLiteral("取消"));
     ok->setMinimumWidth(88); cancelButton->setMinimumWidth(88);
-    ok->setStyleSheet(QStringLiteral("QPushButton#primary{background:@accent;color:@onAccent;border:1px solid @accent;border-radius:7px;padding:6px 18px;font-weight:600;}QPushButton#primary:hover{background:@accentUp;}QPushButton#primary:disabled{background:@disabled;color:@disabled;border:1px solid @disabledLine;}"));
-    cancelButton->setStyleSheet(QStringLiteral("QPushButton#secondary{background:@button;color:@text;border:1px solid @border;border-radius:7px;padding:6px 18px;}QPushButton#secondary:hover{background:@hover;}"));
     auto validate=[edit,errorHint,ok]{const bool good=!edit->text().trimmed().isEmpty();ok->setEnabled(good);errorHint->setText(good?QString():QStringLiteral("名称不能为空。"));};
     connect(edit,&QLineEdit::textChanged,&dialog,validate);
     connect(edit,&QLineEdit::returnPressed,&dialog,[&dialog,ok]{if(ok->isEnabled()) dialog.accept();});
     connect(buttons,&QDialogButtonBox::accepted,&dialog,[&dialog,ok]{if(ok->isEnabled()) dialog.accept();});
     connect(buttons,&QDialogButtonBox::rejected,&dialog,&QDialog::reject);
     validate();
+    Theme::bindModal(&dialog);
     if (dialog.exec()!=QDialog::Accepted) return false;
     *result = edit->text().trimmed();
     return true;
@@ -1213,10 +1247,10 @@ void SearchWindow::openGroup(const QString& id,int page)
     if (found==cfg.groups.cend()) {closeGroup();return;}
     if (!m_groupPanel) {
         auto* panel=new QFrame(this);m_groupPanel=panel;panel->setObjectName("hotaruGroupPanel");
-        Theme::bindLauncher(panel,"QFrame#hotaruGroupPanel{background:@window;border:1px solid @accent;border-radius:16px;}");
+        Theme::bindLauncher(panel,"QFrame#hotaruGroupPanel{background:@window;border:1px solid @borderHi;border-radius:16px;}");
         auto* layout=new QVBoxLayout(panel);layout->setContentsMargins(18,12,18,6);
         m_groupTitle=new QLabel(panel);m_groupTitle->setAlignment(Qt::AlignCenter);
-        Theme::bindLauncher(m_groupTitle,"color:@text;background:transparent;font-size:12pt;border:none;");
+        Theme::bindLauncher(m_groupTitle,"color:@text;background:transparent;font-size:13pt;font-weight:600;border:none;");
         layout->addWidget(m_groupTitle);
         m_groupGrid=new LauncherGrid(panel);m_groupGrid->setObjectName("hotaruGroupGrid");m_groupGrid->setGroupMode(true);
         layout->addWidget(m_groupGrid,1);wireGrid(m_groupGrid);
@@ -1252,7 +1286,7 @@ void SearchWindow::pinnedMenu(const QString& id,const QPoint& globalPos)
     const auto cfg=PinnedApps::config();
     const auto group=std::find_if(cfg.groups.cbegin(),cfg.groups.cend(),[&](const auto& g){return g.id==id;});
     if (group!=cfg.groups.cend()) {
-        QMenu menu(this);Theme::bindMenu(&menu);m_menu=&menu;
+        QMenu menu(this);Theme::bindLauncherMenu(&menu);m_menu=&menu;
         menu.addAction(QStringLiteral("打开"),this,[this,id]{openGroup(id);});
         menu.addAction(QStringLiteral("重命名…"),this,[this,id]{renamePinned(id);});
         menu.addAction(QStringLiteral("解散"),this,[this,id] {
@@ -1265,7 +1299,7 @@ void SearchWindow::pinnedMenu(const QString& id,const QPoint& globalPos)
     const auto found=std::find_if(apps.cbegin(),apps.cend(),[&](const auto& a){return a.id==id;});
     if (found==apps.cend()) return;
     const auto app=*found;
-    QMenu menu(this);Theme::bindMenu(&menu);m_menu=&menu;
+    QMenu menu(this);Theme::bindLauncherMenu(&menu);m_menu=&menu;
     const auto invoke=[this,app](bool admin) {
         QString error;
         const bool ok=admin?PinnedApps::launchAdmin(app,&error):PinnedApps::launch(app,&error);
@@ -1510,6 +1544,8 @@ bool SearchWindow::eventFilter(QObject* obj, QEvent* e)
             }
         }
     }
+    if (m_list && obj == m_list->viewport() && (e->type() == QEvent::Leave || e->type() == QEvent::Hide))
+        static_cast<ResultDelegate*>(m_list->itemDelegate())->setActionHover();
     if (m_list && obj==m_list->viewport() && (e->type()==QEvent::MouseButtonPress || e->type()==QEvent::MouseButtonRelease
         || e->type()==QEvent::MouseButtonDblClick || e->type()==QEvent::MouseMove)) {
         auto* mouse=static_cast<QMouseEvent*>(e);
@@ -1524,9 +1560,10 @@ bool SearchWindow::eventFilter(QObject* obj, QEvent* e)
             }
         }
         if (e->type()==QEvent::MouseMove) {
-            m_list->viewport()->setCursor(hit>=0?Qt::PointingHandCursor:Qt::ArrowCursor);
-            m_list->viewport()->setToolTip(hit<0?QString():!pin?QStringLiteral("打开所在位置"):
-                PinnedApps::isPinned(resultPinnedApp(m_results[hit]))?QStringLiteral("已固定"):QStringLiteral("固定到面板"));
+            const QString hint = hit<0?QString():!pin?QStringLiteral("打开所在位置"):
+                PinnedApps::isPinned(resultPinnedApp(m_results[hit]))?QStringLiteral("已固定"):QStringLiteral("固定到面板");
+            static_cast<ResultDelegate*>(m_list->itemDelegate())->setActionHover(
+                hit >= 0 ? m_list->model()->index(m_list->row(item), 0) : QModelIndex(), hit >= 0 && pin, hint);
         } else if (mouse->button()==Qt::LeftButton) {
             if (e->type()==QEvent::MouseButtonPress) {
                 m_list->setProperty("actionPress",hit);m_list->setProperty("actionPin",pin);
@@ -1673,6 +1710,7 @@ void SearchWindow::rebuildList()
 {
     if (m_homeScroll)
         m_homeScroll->setVisible(false);
+    static_cast<ResultDelegate*>(m_list->itemDelegate())->setActionHover();
     m_list->clear();
     int firstActionable = -1;
     for (int i = 0; i < m_results.size(); ++i) {
@@ -2584,7 +2622,7 @@ void SearchWindow::openContextMenu(const QPoint& globalPos)
     }
     m_menu = new QMenu(this);
     m_menu->setAttribute(Qt::WA_DeleteOnClose);
-    m_menu->setStyleSheet(Utils::darkMenuStyle());
+    Theme::bindLauncherMenu(m_menu);
     connect(m_menu, &QMenu::aboutToHide, this, [this] {
         m_menu = nullptr;
         if (!isActiveWindow())

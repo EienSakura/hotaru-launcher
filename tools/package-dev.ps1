@@ -21,7 +21,7 @@ $runPath = Join-Path $outputParent ([IO.Path]::GetFileNameWithoutExtension($outP
 if ((Test-Path -LiteralPath $outPath) -or (Test-Path -LiteralPath $runPath)) {
     throw 'ZIP 或同名运行目录已存在，请指定新的输出名称。'
 }
-foreach ($required in @('HotaruDev.exe', 'ltoolcore.dll', 'Qt6Core.dll', 'platforms/qwindows.dll')) {
+foreach ($required in @('HotaruDev.exe', 'ltoolcore.dll', 'Qt6Core.dll', 'Qt6Svg.dll', 'platforms/qwindows.dll')) {
     if (!(Test-Path -LiteralPath (Join-Path $runtime $required) -PathType Leaf)) {
         throw "缺少运行文件：$required"
     }
@@ -47,7 +47,7 @@ try {
             Add-DevEntry $dll.FullName $dll.Name
         }
         # 仅打包运行库；不递归收集配置、缓存、日志或工具插件。
-        foreach ($dir in @('platforms', 'imageformats', 'styles', 'networkinformation', 'tls')) {
+        foreach ($dir in @('platforms', 'imageformats', 'iconengines', 'styles', 'networkinformation', 'tls')) {
             $sourceDir = Join-Path $runtime $dir
             if (!(Test-Path -LiteralPath $sourceDir -PathType Container)) { continue }
             foreach ($dll in Get-ChildItem -LiteralPath $sourceDir -File -Filter '*.dll') {

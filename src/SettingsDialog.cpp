@@ -1,4 +1,9 @@
 #include "SettingsDialog.h"
+#include "SettingsControlStyle.h"
+#include "SettingsFrame.h"
+#include "SettingsIcons.h"
+#include "SettingsPalette.h"
+#include <QGuiApplication>
 #include <QDesktopServices>
 #include "BuildChannel.h"
 #include "HotaruNativeHost.h"
@@ -18,6 +23,7 @@
 #include <QDir>
 #include <QEvent>
 #include <QFileInfo>
+#include <QFocusEvent>
 #include <QCheckBox>
 #include <QSpinBox>
 #include <QFormLayout>
@@ -43,9 +49,9 @@
 #include <QTimer>
 #include <QToolButton>
 #include <QVBoxLayout>
+#include <QtMath>
 
 #include <windows.h>
-#include <dwmapi.h>
 
 namespace {
 
@@ -63,62 +69,77 @@ QIcon spinnerIcon(int frame)
     return QIcon(pm);
 }
 
-// 设置侧栏使用统一的无文字矢量图标，避免把首个汉字当作图标导致视觉含义不稳定。
-QIcon sectionIcon(int section, const QColor& color)
+QIcon sectionIcon(int section, const SettingsPalette& colors)
 {
-    if (section == 1)
-        return Utils::bagIcon(color);
-    QPixmap pm(48, 48);
-    pm.fill(Qt::transparent);
-    QPainter p(&pm);
-    p.setRenderHint(QPainter::Antialiasing);
-    p.setPen(Qt::NoPen);
-    p.setBrush(color);
-    p.drawRoundedRect(QRectF(2, 2, 44, 44), 12, 12);
-    p.setBrush(Qt::NoBrush);
-    p.setPen(QPen(Qt::white, 2.6, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
-    if (section == 0) {
-        p.drawEllipse(QRectF(13, 10, 22, 28));
-        p.drawLine(QPointF(13, 24), QPointF(35, 24));
-        p.drawArc(QRectF(18, 10, 12, 28), 90 * 16, 180 * 16);
-        p.drawArc(QRectF(18, 10, 12, 28), 270 * 16, 180 * 16);
-    } else if (section == 2) {
-        p.drawLine(QPointF(13, 15), QPointF(35, 15));
-        p.drawLine(QPointF(13, 24), QPointF(35, 24));
-        p.drawLine(QPointF(13, 33), QPointF(35, 33));
-        p.setBrush(Qt::white);
-        p.drawEllipse(QPointF(20, 15), 3.2, 3.2);
-        p.drawEllipse(QPointF(29, 24), 3.2, 3.2);
-        p.drawEllipse(QPointF(17, 33), 3.2, 3.2);
-    } else {
-        p.drawEllipse(QRectF(13, 13, 22, 22));
-        p.setPen(QPen(Qt::white, 3.2, Qt::SolidLine, Qt::RoundCap));
-        p.drawPoint(QPointF(24, 19));
-        p.drawLine(QPointF(24, 24), QPointF(24, 31));
-    }
-    return QIcon(pm);
+    constexpr SettingsGlyph glyphs[] = {
+        SettingsGlyph::Search, SettingsGlyph::Plug, SettingsGlyph::Gear, SettingsGlyph::Info
+    };
+    auto icon = settingsIcon(glyphs[section], QColor(colors.muted));
+    icon.addPixmap(settingsIcon(glyphs[section], QColor(colors.accent)).pixmap(72, 72), QIcon::Selected);
+    return icon;
 }
+
+constexpr int kFrameRadius = 17;
+constexpr int kTitleHeight = 40;
+
+class SettingsNavigation final : public QListWidget {
+public:
+    using QListWidget::QListWidget;
+
+protected:
+    bool event(QEvent* event) override
+    {
+        if (event->type() == QEvent::FocusIn) {
+            const auto reason = static_cast<QFocusEvent*>(event)->reason();
+            if (reason != Qt::ActiveWindowFocusReason)
+                setKeyboardFocus(reason == Qt::TabFocusReason || reason == Qt::BacktabFocusReason);
+        } else if (event->type() == QEvent::KeyPress) {
+            setKeyboardFocus(true);
+        }
+        return QListWidget::event(event);
+    }
+
+    void mousePressEvent(QMouseEvent* event) override
+    {
+        setKeyboardFocus(false);
+        QListWidget::mousePressEvent(event);
+    }
+
+private:
+    void setKeyboardFocus(bool value)
+    {
+        if (property("keyboardFocus").toBool() == value)
+            return;
+        setProperty("keyboardFocus", value);
+        style()->unpolish(this);
+        style()->polish(this);
+        viewport()->update();
+    }
+};
 
 // 设置页整体深色主题（子页面共享）
 const char* kSettingsQss = R"QSS(
-QDialog { background: @window; }
-QDialog > QWidget { background: transparent; }
-
 QLabel { color: @text; background: transparent; }
 QLabel#tip { color: @muted; }
-QLabel#pageTitle { font-size: 14pt; font-weight: 600; }
+QLabel#pageTitle { font-size: 21pt; font-weight: 700; }
 QLabel#muted { color: @muted; }
+QLabel#settingsRowTitle { font-weight: 600; }
+QLabel#settingsBadge { color: @muted; background: @field; border: 1px solid @line;
+    border-radius: 6px; padding: 3px 8px; }
+QLabel#pluginSummary { color: @muted; background: @group; border: 1px solid @line;
+    border-radius: 9px; padding: 9px 12px; }
 
 QGroupBox {
     color: @groupText;
     border: 1px solid @line;
-    border-radius: 10px;
+    border-radius: 13px;
     margin-top: 16px;
     padding: 14px 12px 12px 12px;
     font-weight: 600;
     background: @group;
 }
 QGroupBox::title { subcontrol-origin: margin; left: 12px; padding: 0 4px; }
+QPushButton:focus { border-color: @accent; }
 
 QPlainTextEdit {
     background: @edit;
@@ -128,7 +149,7 @@ QPlainTextEdit {
     font-family: Consolas, monospace;
     font-size: 9pt;
 }
-QLineEdit, QComboBox, QSpinBox, QTimeEdit, QKeySequenceEdit {
+QLineEdit, QComboBox, QWidget#settingsCompatibility QSpinBox, QTimeEdit, QKeySequenceEdit {
     background: @field;
     border: 1px solid @border;
     border-radius: 8px;
@@ -136,7 +157,7 @@ QLineEdit, QComboBox, QSpinBox, QTimeEdit, QKeySequenceEdit {
     color: @text;
     selection-background-color: @accent;
 }
-QLineEdit:focus, QComboBox:focus, QSpinBox:focus, QTimeEdit:focus, QKeySequenceEdit:focus {
+QLineEdit:focus, QComboBox:focus, QWidget#settingsCompatibility QSpinBox:focus, QTimeEdit:focus, QKeySequenceEdit:focus {
     border: 1px solid @accent;
 }
 QComboBox::drop-down { border: none; width: 22px; }
@@ -152,8 +173,9 @@ QPushButton {
     background: @button;
     color: @text;
     border: 1px solid @border;
-    border-radius: 8px;
-    padding: 6px 14px;
+    border-radius: 9px;
+    padding: 6px 12px;
+    min-height: 18px;
 }
 QPushButton:hover { background: @hover; }
 QPushButton:pressed { background: @pressed; }
@@ -168,6 +190,13 @@ QPushButton#primary:hover { background: @accentUp; }
 QPushButton#primary:pressed { background: @accentDown; }
 /* #primary 的 ID 选择器比 :disabled 优先，不补这条的话"禁用的主按钮"看着还是能点 */
 QPushButton#primary:disabled { background: @field; border: 1px solid @line; color: @disabled; }
+QPushButton[settingsPrimary="true"]:enabled {
+    background: @primary; color: @onPrimary; border-color: @primary; font-weight: 600;
+}
+QPushButton[settingsPrimary="true"]:enabled:hover { background: @accent; }
+QPushButton[settingsPrimary="true"]:focus { border-color: @text; }
+QPushButton#quickMore { padding: 6px 7px; }
+QPushButton#quickMore::menu-indicator { width: 0; }
 /* 列表行上的小动作按钮：一行四个，要紧凑，但禁用时必须一眼看出来 */
 QPushButton#rowBtn {
     padding: 2px 9px;
@@ -188,15 +217,31 @@ QToolButton#pluginGroupToggle {
 QToolButton#pluginGroupToggle:hover { background: @hover; }
 QToolButton#pluginGroupToggle:focus { border-color: @accent; }
 QFrame#pluginCard, QFrame#lanDetailCard {
-    background: @field; border: 1px solid @line; border-radius: 10px;
+    background: @group; border: 1px solid @line; border-radius: 13px;
 }
+QFrame#pluginCard:focus { border-color: @accent; }
+QWidget#settingsNativeDetail, QWidget#lanDetailBody { background: @window; }
+QWidget#settingsNativeDetail QScrollArea,
+QWidget#settingsNativeDetail QScrollArea > QWidget#qt_scrollarea_viewport {
+    background: @window; border: none;
+}
+QLabel#lanDetailTitle { font-size: 21pt; font-weight: 700; }
+QPushButton#nativeDetailBack { background: transparent; color: @muted; outline: none; }
+QPushButton#nativeDetailBack:hover { background: @hover; color: @text; }
+QPushButton#nativeDetailBack:focus { border-color: @accent; }
+QListWidget#lanPairedDevices {
+    background: @field; color: @text; border: 1px solid @line; border-radius: 8px;
+    padding: 4px; outline: none;
+}
+QListWidget#lanPairedDevices::item { padding: 5px 8px; border-radius: 5px; }
+QListWidget#lanPairedDevices::item:selected { background: @selBg; color: @text; }
 QLabel#lanDropHint {
     background: @group; color: @muted; border: 1px dashed @border;
     border-radius: 8px; padding: 6px 10px;
 }
 QLabel#hotaruNativeBadge {
-    background: @accent;
-    color: @onAccent;
+    background: @primary;
+    color: @onPrimary;
     border-radius: 5px;
     padding: 2px 6px;
     font-size: 8.5pt;
@@ -214,14 +259,18 @@ QLabel#pluginVersionBadge {
 QLabel#colHead { color: @muted; font-size: 8.5pt; font-weight: 600; background: transparent; }
 
 QCheckBox { color: @text; spacing: 8px; background: transparent; }
-QCheckBox::indicator {
+QWidget#pluginHome QCheckBox::indicator, QWidget#settingsCompatibility QCheckBox::indicator {
     width: 16px; height: 16px;
     border: 1px solid @border;
     border-radius: 4px;
     background: @field;
 }
-QCheckBox::indicator:checked { background: @accent; border-color: @accent; }
-QCheckBox::indicator:hover { border-color: @accentUp; }
+QWidget#pluginHome QCheckBox::indicator:checked, QWidget#settingsCompatibility QCheckBox::indicator:checked {
+    background: @accent; border-color: @accent;
+}
+QWidget#pluginHome QCheckBox::indicator:hover, QWidget#settingsCompatibility QCheckBox::indicator:hover {
+    border-color: @accentUp;
+}
 
 QListWidget {
     background: @group;
@@ -237,29 +286,25 @@ QListWidget {
 QListWidget::item { padding: 0 8px; border-radius: 6px; }
 QListWidget::item:selected { background: @accent; color: @onAccent; }
 QListWidget::item:hover:!selected { background: @hover; }
-
-QListWidget#menuList {
-    font-size: 11pt;
-    font-weight: 500;
-    padding: 6px;
-}
-QListWidget#menuList::item {
-    padding: 0 10px;
-    border-radius: 8px;
-}
-
-
-
-
+QListWidget#webList::item { border-bottom: 1px solid @line; border-radius: 0; }
+QListWidget#webList::item:last { border-bottom: none; }
 
 QTabWidget::pane { border: none; background: transparent; }
 QTabBar::tab { background: @field; color: @groupText; border: 1px solid @line;
     padding: 7px 16px; margin-right: 4px; border-top-left-radius: 8px; border-top-right-radius: 8px; }
 QTabBar::tab:selected { background: @button; color: @text; border-bottom-color: @accent; }
 QTabBar::tab:hover:!selected { background: @pressed; color: @text; }
-
-QScrollArea#cfgScroll, QScrollArea#cfgScroll > QWidget#qt_scrollarea_viewport { background: transparent; }
-QWidget#cfgBody { background: transparent; }
+QTabBar#pluginCategoryTabs { background: @field; border: 1px solid @line; border-radius: 10px; }
+QTabBar#pluginCategoryTabs::tab {
+    background: transparent; color: @muted; border: 1px solid transparent;
+    border-radius: 7px; margin: 3px; padding: 5px 11px;
+}
+QTabBar#pluginCategoryTabs::tab:selected { background: @group; color: @text; border-color: @line; }
+QScrollArea#settingsPageScroll, QScrollArea#settingsPageScroll > QWidget#qt_scrollarea_viewport,
+QWidget#aboutPage, QDialog#hotaruSettings QWidget#settingsNativeDetail,
+QDialog#hotaruSettings QWidget#settingsNativeDetail QScrollArea,
+QDialog#hotaruSettings QWidget#settingsNativeDetail QScrollArea > QWidget#qt_scrollarea_viewport,
+QDialog#hotaruSettings QWidget#lanDetailBody { background: transparent; }
 QWidget#rowsHost { background: transparent; }
 /* 列表分组表头（软件页）：不属于 #row 的盒子，只要一行小字 + 上方的呼吸 */
 QLabel#catHead { color: @muted; font-weight: 600; font-size: 9pt; padding: 6px 2px 0 2px; }
@@ -278,6 +323,19 @@ QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
 QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: transparent; }
 )QSS";
 
+const char* kSettingsShellQss = R"QSS(
+QDialog#hotaruSettings { background: transparent; }
+QLabel#settingsWindowTitle { color: @text; font-size: 9pt; font-weight: 600; }
+QToolButton[settingsCaptionButton="true"] { background: transparent; border: 1px solid transparent; border-radius: 6px; }
+QToolButton[settingsCaptionButton="true"]:hover { background: @hover; }
+QToolButton[settingsCaptionButton="true"]:focus { border-color: @accent; }
+QListWidget#menuList { background: transparent; color: @muted; border: none; outline: none; font-size: 10pt; }
+QListWidget#menuList::item { padding: 0 10px; border-radius: 9px; }
+QListWidget#menuList::item:hover { background: @hover; color: @text; }
+QListWidget#menuList::item:selected { background: @selBg; color: @accent; font-weight: 600; }
+QListWidget#menuList[keyboardFocus="true"]::item:selected:focus { border: 1px solid @accent; }
+)QSS";
+
 } // namespace
 
 // 这一页的样式表 = 那份 token 化的 QSS + 弹层那一份。抽成一颗函数是因为
@@ -286,45 +344,105 @@ void SettingsDialog::applyThemeQss()
 {
     // QMenu 那几条不在这里写了：全程序只有 Theme::menuStyle() 那一份（Utils::darkMenuStyle
     // 现在是它的转接，插件那边符号名不能动）
-    setStyleSheet(Theme::expand(kSettingsQss) + Theme::menuStyle());
+    const auto colors = SettingsPalette::current();
+    setStyleSheet(colors.expand(kSettingsShellQss));
+    if (m_stack) {
+        const auto pageStyle = colors.expand(kSettingsQss) + Theme::menuStyle();
+        for (int index = 0; index < m_stack->count(); ++index)
+            if (index != 2 && m_built[index])
+                m_stack->widget(index)->setStyleSheet(pageStyle);
+    }
+    for (auto* style : findChildren<QStyle*>(QStringLiteral("nativeDetailControlStyle")))
+        static_cast<SettingsControlStyle*>(style)->applyTheme(colors);
+    if (m_menu) {
+        for (int row = 0; row < m_menu->count(); ++row)
+            m_menu->item(row)->setIcon(sectionIcon(row, colors));
+    }
+    const auto updateButton = [this, colors](const char* name, SettingsGlyph glyph) {
+        if (auto* button = findChild<QToolButton*>(QLatin1String(name)))
+            button->setIcon(settingsIcon(glyph, QColor(colors.muted)));
+    };
+    updateButton("settingsMinimize", SettingsGlyph::Minimize);
+    updateButton("settingsMaximize", isMaximized() ? SettingsGlyph::Restore : SettingsGlyph::Maximize);
+    updateButton("settingsClose", SettingsGlyph::Close);
+    update();
 }
 
 bool SettingsDialog::event(QEvent* e)
 {
     if (e->type() == QEvent::ThemeChange)
         applyThemeQss();     // 配置页拨完那颗单选，这扇已经开着的窗当场就要变脸
+    if (e->type() == QEvent::WindowStateChange) {
+        if (auto* button = findChild<QToolButton*>(QStringLiteral("settingsMaximize"))) {
+            const auto label = isMaximized() ? QStringLiteral("还原") : QStringLiteral("最大化");
+            button->setToolTip(label);
+            button->setAccessibleName(label);
+        }
+        applyThemeQss();
+    }
     return QDialog::event(e);
 }
 
 SettingsDialog::SettingsDialog(QWidget* parent)
-    : QDialog(parent)
+    : QDialog(parent, Qt::Dialog | Qt::FramelessWindowHint | Qt::WindowSystemMenuHint
+                       | Qt::WindowMinMaxButtonsHint | Qt::WindowCloseButtonHint)
 {
     setWindowTitle(BuildChannel::displayName() + QStringLiteral(" 设置"));
+    setObjectName(QStringLiteral("hotaruSettings"));
+    setAttribute(Qt::WA_TranslucentBackground);
     resize(1140, 790);
-    applyThemeQss();   // 见下面那颗：夜间/日间切换时要能原地重算这一份
+    auto* root = new QVBoxLayout(this);
+    constexpr int edge = SettingsFrame::kBorder;
+    root->setContentsMargins(edge, edge, edge, edge);
+    root->setSpacing(0);
+    auto* titleBar = new QFrame(this);
+    titleBar->setObjectName(QStringLiteral("settingsTitleBar"));
+    titleBar->setFixedHeight(kTitleHeight);
+    auto* titleLayout = new QHBoxLayout(titleBar);
+    titleLayout->setContentsMargins(15, 0, 8, 0);
+    titleLayout->setSpacing(7);
+    auto* brandIcon = new QLabel(titleBar);
+    brandIcon->setPixmap(Utils::appIcon().pixmap(QSize(19, 19), devicePixelRatioF()));
+    titleLayout->addWidget(brandIcon);
+    auto* caption = new QLabel(QStringLiteral("Hotaru 设置"), titleBar);
+    caption->setObjectName(QStringLiteral("settingsWindowTitle"));
+    titleLayout->addWidget(caption);
+    titleLayout->addStretch(1);
+    const auto addCaptionButton = [titleBar, titleLayout](const char* name, const QString& label) {
+        auto* button = new QToolButton(titleBar);
+        button->setObjectName(QLatin1String(name));
+        button->setProperty("settingsCaptionButton", true);
+        button->setAccessibleName(label);
+        button->setToolTip(label);
+        button->setFocusPolicy(Qt::TabFocus);
+        button->setFixedSize(28, 26);
+        button->setIconSize(QSize(14, 14));
+        titleLayout->addWidget(button);
+        return button;
+    };
+    connect(addCaptionButton("settingsMinimize", QStringLiteral("最小化")),
+            &QToolButton::clicked, this, &QWidget::showMinimized);
+    connect(addCaptionButton("settingsMaximize", QStringLiteral("最大化")),
+            &QToolButton::clicked, this, [this] { isMaximized() ? showNormal() : showMaximized(); });
+    connect(addCaptionButton("settingsClose", QStringLiteral("关闭")),
+            &QToolButton::clicked, this, &QWidget::close);
+    root->addWidget(titleBar);
 
-    m_menu = new QListWidget(this);
+    auto* rail = new QFrame(this);
+    rail->setObjectName(QStringLiteral("settingsRail"));
+    rail->setFixedWidth(190);
+    m_menu = new SettingsNavigation(rail);
     m_menu->setObjectName("menuList");
-    m_menu->setFixedWidth(168);
     m_menu->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-    m_menu->setIconSize(QSize(28, 28));
+    m_menu->setIconSize(QSize(18, 18));
     m_menu->setSpacing(5);              // 条目之间留缝，背景块不再首尾相接
     m_menu->setUniformItemSizes(true);
 
-    struct MenuDef { const char* name; QColor color; int section; };
-    // 只有四行。语言并进「配置」那一页里的一节，软件 / 下载器 / 定时任务搬成了插件商店里的卡片 ——
-    // 颜色沿用它们原来那一行的，一眼还认得出来。
-    // 每一行都使用独立绘制的矢量图形；插件商店沿用袋子图标，其余页面使用功能图形。
-    const MenuDef defs[] = {
-        {"快捷搜索", QColor(6, 182, 212), 0},
-        {"插件", QColor(249, 115, 22), 1},
-        {"配置", QColor(59, 130, 246), 2},
-        {"关于", QColor(168, 85, 247), 3},
-    };
-    for (const MenuDef& d : defs) {
-        const QIcon icon = sectionIcon(d.section, d.color);
-        auto* it = new QListWidgetItem(icon, d.name);
-        it->setSizeHint(QSize(0, 50));   // 只约束行高，宽度由视口决定，避免底部滚动条。
+    const QStringList names = {QStringLiteral("快捷搜索"), QStringLiteral("插件"),
+                               QStringLiteral("配置"), QStringLiteral("关于")};
+    for (int row = 0; row < names.size(); ++row) {
+        auto* it = new QListWidgetItem(names.at(row));
+        it->setSizeHint(QSize(0, 41));   // 宽度由视口决定，避免横向滚动。
         m_menu->addItem(it);
     }
 
@@ -332,20 +450,24 @@ SettingsDialog::SettingsDialog(QWidget* parent)
     for (int i = 0; i < 4; ++i)
         m_stack->addWidget(new QWidget(m_stack)); // 占位，选中时懒加载
 
-    auto* lay = new QHBoxLayout(this);
-    lay->setContentsMargins(10, 10, 10, 10);
-    lay->setSpacing(12);
-    auto* menuCol = new QVBoxLayout;
-    menuCol->setContentsMargins(0, 0, 0, 0);
+    auto* lay = new QHBoxLayout;
+    lay->setContentsMargins(0, 0, 0, 0);
+    lay->setSpacing(0);
+    auto* menuCol = new QVBoxLayout(rail);
+    menuCol->setContentsMargins(11, 18, 11, 10);
     menuCol->setSpacing(6);
     menuCol->addWidget(m_menu, 1);
     buildBusyRow();
     menuCol->addWidget(m_busy);
-    lay->addLayout(menuCol);
+    lay->addWidget(rail);
     lay->addWidget(m_stack, 1);
+    root->addLayout(lay, 1);
+    applyThemeQss();
 
     connect(m_menu, &QListWidget::currentRowChanged, this, &SettingsDialog::ensurePage);
+    connect(m_stack, &QStackedWidget::currentChanged, this, [this] { update(); });
     m_menu->setCurrentRow(0);
+    m_menu->setFocus(Qt::OtherFocusReason);
 
 }
 
@@ -409,7 +531,19 @@ void SettingsDialog::ensurePage(int index)
         page = configPage;
         break;
     }
-    case 3: page = new AboutPage(this); break;
+    case 3: {
+        auto* scroll = new QScrollArea(this);
+        scroll->setObjectName(QStringLiteral("settingsPageScroll"));
+        scroll->setFrameShape(QFrame::NoFrame);
+        scroll->setWidgetResizable(true);
+        scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+        scroll->setWidget(new AboutPage);
+        page = scroll;
+        break;
+    }
+    }
+    if (index != 2) {
+        page->setStyleSheet(SettingsPalette::current().expand(kSettingsQss) + Theme::menuStyle());
     }
     QWidget* old = m_stack->widget(index);
     m_stack->removeWidget(old);
@@ -429,13 +563,6 @@ void SettingsDialog::openPluginRepository()
 {
     auto* dialog = new QDialog(this, Qt::Dialog | Qt::WindowCloseButtonHint);
     dialog->setObjectName(QStringLiteral("pluginRepositoryDialog"));
-    // 子窗口不能沿用设置页对子控件的透明底色。
-    Theme::bind(dialog, R"QSS(
-        QDialog#pluginRepositoryDialog,
-        QScrollArea#pluginRepositoryScroll,
-        QScrollArea#pluginRepositoryScroll > QWidget#qt_scrollarea_viewport,
-        QWidget#pluginRepositoryGroups { background: @window; }
-    )QSS");
     dialog->setWindowTitle(QStringLiteral("Hotaru 官方插件仓库"));
     dialog->setAttribute(Qt::WA_DeleteOnClose);
     dialog->resize(820, 610);
@@ -452,6 +579,7 @@ void SettingsDialog::openPluginRepository()
     connect(dialog, &QDialog::finished, client, [client] {
         if (client->busy()) client->cancel();
     });
+    Theme::bindModal(dialog, true);
     dialog->open();
     client->refresh();
 }
@@ -459,18 +587,25 @@ void SettingsDialog::openPluginRepository()
 QWidget* SettingsDialog::buildPluginPage(QWidget* parent, HotaruPluginRepository::Client* client)
 {
     auto* home = new QWidget(parent);
+    home->setObjectName(QStringLiteral("pluginHome"));
+    if (client)
+        Theme::bindSettings(home, kSettingsQss);
     auto* layout = new QVBoxLayout(home);
-    layout->setContentsMargins(28, 24, 28, 24);
-    layout->setSpacing(16);
+    layout->setContentsMargins(30, 20, 30, 20);
+    layout->setSpacing(13);
 
     auto* header = new QHBoxLayout;
-    auto* title = new QLabel(client ? QStringLiteral("官方插件仓库") : QStringLiteral("Hotaru插件"), home);
+    auto* titles = new QVBoxLayout;
+    titles->setSpacing(4);
+    auto* title = new QLabel(client ? QStringLiteral("官方插件仓库") : QStringLiteral("插件"), home);
     title->setObjectName(QStringLiteral("pageTitle"));
-    QFont titleFont = title->font();
-    titleFont.setPointSizeF(titleFont.pointSizeF() + 5);
-    titleFont.setBold(true);
-    title->setFont(titleFont);
-    header->addWidget(title, 1);
+    titles->addWidget(title);
+    auto* intro = new QLabel(client ? QStringLiteral("浏览适用于当前版本的基础服务和功能插件。")
+                                   : QStringLiteral("管理已安装的 Hotaru 插件。"), home);
+    intro->setObjectName(QStringLiteral("muted"));
+    intro->setWordWrap(true);
+    titles->addWidget(intro);
+    header->addLayout(titles, 1);
     QPushButton* refreshCatalog = nullptr;
     QPushButton* cancelDownload = nullptr;
     QPushButton* manualDownload = nullptr;
@@ -491,11 +626,12 @@ QWidget* SettingsDialog::buildPluginPage(QWidget* parent, HotaruPluginRepository
     } else {
         auto* repository = new QPushButton(QStringLiteral("官方仓库"), home);
         repository->setObjectName(QStringLiteral("openPluginRepository"));
+        repository->setProperty("settingsPrimary", true);
         auto* importButton = new QPushButton(QStringLiteral("导入本地插件"), home);
         auto* compatibility = new QPushButton(QStringLiteral("ltool 兼容插件"), home);
-        header->addWidget(repository);
-        header->addWidget(importButton);
         header->addWidget(compatibility);
+        header->addWidget(importButton);
+        header->addWidget(repository);
         connect(repository, &QPushButton::clicked, this, &SettingsDialog::openPluginRepository);
         connect(compatibility, &QPushButton::clicked, this, [this] { openCompatibilityPlugins(); });
         connect(importButton, &QPushButton::clicked, home, [this] {
@@ -521,13 +657,17 @@ QWidget* SettingsDialog::buildPluginPage(QWidget* parent, HotaruPluginRepository
 
     auto* hint = new QLabel(home);
     hint->setTextFormat(Qt::PlainText);
-    hint->setObjectName(QStringLiteral("muted"));
+    hint->setObjectName(QStringLiteral("pluginSummary"));
     hint->setWordWrap(true);
     layout->addWidget(hint);
 
+    auto* sectionLabel = new QLabel(client ? QStringLiteral("目录") : QStringLiteral("已安装"), home);
+    sectionLabel->setObjectName(QStringLiteral("settingsRowTitle"));
+    layout->addWidget(sectionLabel);
     auto* tabs = new QTabBar(home);
     tabs->setObjectName(QStringLiteral("pluginCategoryTabs"));
     tabs->setExpanding(false);
+    tabs->setDrawBase(false);
     tabs->addTab(QStringLiteral("全部"));
     tabs->addTab(QStringLiteral("基础服务"));
     tabs->addTab(QStringLiteral("功能插件"));
@@ -591,15 +731,16 @@ QWidget* SettingsDialog::buildPluginPage(QWidget* parent, HotaruPluginRepository
         card->setObjectName(QStringLiteral("pluginCard"));
         card->setFocusPolicy(Qt::StrongFocus);
         auto* body = new QVBoxLayout(card);
-        body->setContentsMargins(12, 10, 12, 10);
-        body->setSpacing(5);
+        body->setContentsMargins(14, 12, 14, 12);
+        body->setSpacing(7);
         card->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Maximum);
 
         auto* heading = new QHBoxLayout;
+        heading->addWidget(new SettingsIconTile(SettingsGlyph::Plug, card));
         auto* name = new QLabel(info.name, card);
         name->setTextFormat(Qt::PlainText);
         name->setWordWrap(true);
-        QFont nameFont = name->font(); nameFont.setBold(true); nameFont.setPointSizeF(nameFont.pointSizeF() + 1); name->setFont(nameFont);
+        name->setObjectName(QStringLiteral("settingsRowTitle"));
         heading->addWidget(name, 0, Qt::AlignVCenter);
         if (!info.version.isEmpty()) {
             auto* version = new QLabel(info.version, card);
@@ -631,6 +772,7 @@ QWidget* SettingsDialog::buildPluginPage(QWidget* parent, HotaruPluginRepository
             status->setText(info.preview ? QStringLiteral("来源已验证 · 开发预览") : QStringLiteral("来源已验证"));
             auto* action = new QPushButton(info.installed ? QStringLiteral("更新／替换") : QStringLiteral("安装"), card);
             action->setObjectName(QStringLiteral("pluginCatalogInstall"));
+            action->setProperty("settingsPrimary", true);
             actions->addStretch();
             actions->addWidget(action);
             body->addLayout(actions);
@@ -848,6 +990,8 @@ bool SettingsDialog::openNativePlugin(const QString& id, const QByteArray& targe
     openAt(1);
     ensurePage(1);
     auto* panel = new QWidget(m_pluginStack);
+    panel->setObjectName(QStringLiteral("settingsNativeDetail"));
+    panel->setAttribute(Qt::WA_StyledBackground);
     auto* page = HotaruNativeHost::createPage(id, panel, target);
     if (!page) {
         delete panel;
@@ -859,8 +1003,15 @@ bool SettingsDialog::openNativePlugin(const QString& id, const QByteArray& targe
         previous->deleteLater();
     }
     auto* layout = new QVBoxLayout(panel);
+    layout->setContentsMargins(0, 0, 0, 0);
+    layout->setSpacing(4);
+    auto* toolbar = new QHBoxLayout;
+    toolbar->setContentsMargins(30, 14, 30, 0);
     auto* back = new QPushButton(QStringLiteral("返回插件首页"), panel);
-    layout->addWidget(back, 0, Qt::AlignLeft);
+    back->setObjectName(QStringLiteral("nativeDetailBack"));
+    toolbar->addWidget(back);
+    toolbar->addStretch();
+    layout->addLayout(toolbar);
     layout->addWidget(page, 1);
     if (id == QLatin1String(kHotaruLanClipboardId)) {
         auto& store = ClipboardStore::instance();
@@ -876,6 +1027,7 @@ bool SettingsDialog::openNativePlugin(const QString& id, const QByteArray& targe
             // 旧前置包没有预留历史栏；宿主仍按左右分栏显示。
             layout->removeWidget(page);
             auto* columns = new QHBoxLayout;
+            columns->setContentsMargins(0, 0, 30, 0);
             columns->setSpacing(12);
             columns->addWidget(page, 1);
             history = new QFrame(panel);
@@ -924,6 +1076,14 @@ bool SettingsDialog::openNativePlugin(const QString& id, const QByteArray& targe
         m_pluginStack->removeWidget(panel);
         panel->deleteLater();
     });
+    auto* style = new SettingsControlStyle(panel);
+    style->setObjectName(QStringLiteral("nativeDetailControlStyle"));
+    style->setAnimationsEnabled(false);
+    style->applyTheme(SettingsPalette::current());
+    for (auto* checkbox : panel->findChildren<QCheckBox*>())
+        checkbox->setStyle(style);
+    for (auto* spinner : panel->findChildren<QSpinBox*>())
+        spinner->setStyle(style);
     m_pluginStack->addWidget(panel);
     m_pluginStack->setCurrentWidget(panel);
     return true;
@@ -933,6 +1093,7 @@ ToolsPage* SettingsDialog::openCompatibilityPlugins()
     ensurePage(1);
     if (!m_toolsPage) {
         auto* panel = new QWidget(m_pluginStack);
+        panel->setObjectName(QStringLiteral("settingsCompatibility"));
         auto* layout = new QVBoxLayout(panel);
         auto* back = new QPushButton(QStringLiteral("返回插件首页"), panel);
         layout->addWidget(back, 0, Qt::AlignLeft);
@@ -964,20 +1125,93 @@ bool SettingsDialog::showTool(const QString& id, const QString& text)
 void SettingsDialog::showEvent(QShowEvent* e)
 {
     QDialog::showEvent(e);
-    // Win10/11 深色标题栏
+    if (QGuiApplication::platformName() != QLatin1String("windows"))
+        return;
     HWND h = reinterpret_cast<HWND>(winId());
-    BOOL dark = TRUE;
-    DwmSetWindowAttribute(h, DWMWA_USE_IMMERSIVE_DARK_MODE, &dark, sizeof(dark));
+    // 原生样式负责系统移动、缩放和窗口菜单，客户区由 WM_NCCALCSIZE 扩展到边缘。
+    const LONG_PTR style = GetWindowLongPtrW(h, GWL_STYLE);
+    constexpr LONG_PTR frame = WS_CAPTION | WS_THICKFRAME | WS_SYSMENU | WS_MINIMIZEBOX | WS_MAXIMIZEBOX;
+    if ((style & frame) != frame) {
+        SetWindowLongPtrW(h, GWL_STYLE, style | frame);
+        SetWindowPos(h, nullptr, 0, 0, 0, 0,
+                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+    }
+    if (testAttribute(Qt::WA_DontShowOnScreen))
+        return;
     // 明确取消置顶并激活展示在前台
     SetWindowPos(h, HWND_NOTOPMOST, 0, 0, 0, 0,
                  SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
     SetForegroundWindow(h);
 }
 
+void SettingsDialog::paintEvent(QPaintEvent*)
+{
+    const auto* title = findChild<QFrame*>(QStringLiteral("settingsTitleBar"), Qt::FindDirectChildrenOnly);
+    const auto* rail = findChild<QFrame*>(QStringLiteral("settingsRail"), Qt::FindDirectChildrenOnly);
+    QRect footer;
+    if (const auto* page = m_stack->currentWidget()) {
+        if (const auto* status = page->findChild<QFrame*>(QStringLiteral("settingsFooter")))
+            footer = QRect(status->mapTo(this, QPoint{}), status->size());
+    }
+    QPainter painter(this);
+    SettingsFrame::paint(painter, rect(), isMaximized() || isFullScreen() ? 0 : kFrameRadius,
+                         title->geometry().bottom() + 1, rail->geometry(), footer);
+}
+
+void SettingsDialog::resizeEvent(QResizeEvent* e)
+{
+    QDialog::resizeEvent(e);
+    update();
+}
+
+bool SettingsDialog::nativeEvent(const QByteArray& eventType, void* message, qintptr* result)
+{
+    if (eventType != QByteArrayLiteral("windows_generic_MSG") || !message || !result)
+        return QDialog::nativeEvent(eventType, message, result);
+    const auto* msg = static_cast<const MSG*>(message);
+    if (msg->message == WM_NCCALCSIZE) {
+        if (msg->wParam && IsZoomed(msg->hwnd)) {
+            auto* area = reinterpret_cast<NCCALCSIZE_PARAMS*>(msg->lParam);
+            MONITORINFO monitor{sizeof(MONITORINFO)};
+            if (GetMonitorInfoW(MonitorFromRect(&area->rgrc[0], MONITOR_DEFAULTTONEAREST), &monitor))
+                area->rgrc[0] = monitor.rcWork;
+        }
+        *result = 0;
+        return true;
+    }
+    if (msg->message != WM_NCHITTEST)
+        return QDialog::nativeEvent(eventType, message, result);
+
+    POINT native{static_cast<short>(LOWORD(msg->lParam)), static_cast<short>(HIWORD(msg->lParam))};
+    ScreenToClient(msg->hwnd, &native);
+    const qreal scale = devicePixelRatioF();
+    const QPoint pos(qFloor(native.x / scale), qFloor(native.y / scale));
+    const auto* title = findChild<QFrame*>(QStringLiteral("settingsTitleBar"), Qt::FindDirectChildrenOnly);
+    const bool overTitle = title && title->geometry().contains(pos);
+    if (overTitle && qobject_cast<QToolButton*>(title->childAt(pos - title->pos()))) {
+        *result = HTCLIENT;
+        return true;
+    }
+    if (!isMaximized() && !isFullScreen()) {
+        constexpr int edge = 6;
+        const int col = pos.x() < edge ? 0 : pos.x() >= width() - edge ? 2 : 1;
+        const int row = pos.y() < edge ? 0 : pos.y() >= height() - edge ? 2 : 1;
+        constexpr int hits[3][3] = {{HTTOPLEFT, HTTOP, HTTOPRIGHT},
+                                    {HTLEFT, HTCLIENT, HTRIGHT},
+                                    {HTBOTTOMLEFT, HTBOTTOM, HTBOTTOMRIGHT}};
+        if (hits[row][col] != HTCLIENT) {
+            *result = hits[row][col];
+            return true;
+        }
+    }
+    *result = overTitle ? HTCAPTION : HTCLIENT;
+    return true;
+}
+
 void SettingsDialog::reject()
 {
-    // 按 Esc 键等同于关闭窗口，确保触发 closeEvent 与 WA_DeleteOnClose 彻底析构
-    close();
+    // 复用 Qt 的关窗流程，避免 closeEvent 进入 reject 后再次调用 close。
+    QDialog::reject();
 }
 
 void SettingsDialog::openAt(int menuRow, int tab, const QString& toolId)

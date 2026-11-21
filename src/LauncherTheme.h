@@ -64,6 +64,7 @@ QString launcherToken(const char* role);
 QColor launcherColor(const char* role);
 QString expandLauncher(const QString& qssWithTokens);
 void bindLauncher(QWidget* w, const char* qssWithTokens);
+void bindLauncherMenu(QWidget* menu);
 void applyToLauncher(QWidget* w);
 
 } // namespace Theme

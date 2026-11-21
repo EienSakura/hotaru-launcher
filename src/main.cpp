@@ -15,7 +15,6 @@
 #include "platform/Launch.h"
 #include "AdBlocker.h"
 #include "CaptureHistory.h"
-#include "ConfigPage.h"
 #include "HotaruNativeHost.h"
 #include "HotaruPluginRepository.h"
 #include "DevEnv.h"
@@ -42,6 +41,7 @@
 #include "StartupAudit.h"
 #include "SearchWindow.h"
 int runHotaruSelftest(QApplication&, bool, const QString&);
+int runHotaruSettingsSelftest(const QStringList&);
 #include "SettingsDialog.h"
 #include "SilentInstallLog.h"
 #include "TaskScheduler.h"
@@ -51,7 +51,7 @@ int runHotaruSelftest(QApplication&, bool, const QString&);
 #include "WebShortcuts.h"
 
 #include <QApplication>
-#include <QComboBox>
+#include <QCheckBox>
 #include <clocale>
 #include <QAbstractNativeEventFilter>
 #include <QDir>
@@ -59,6 +59,7 @@ int runHotaruSelftest(QApplication&, bool, const QString&);
 #include <QLabel>
 #include <QListWidget>
 #include <QMessageBox>
+#include <QKeyEvent>
 #include <QNetworkAccessManager>
 #include <QNetworkProxy>
 #include <QNetworkReply>
@@ -70,12 +71,11 @@ int runHotaruSelftest(QApplication&, bool, const QString&);
 #include <QFrame>
 #include <QRegularExpression>
 #include <QPushButton>
-#include <QRadioButton>
-#include <QGroupBox>
 #include <QLayout>
 #include <QScrollArea>
+#include <QScreen>
 #include <QStackedWidget>
-#include <QTabWidget>
+#include <QStyle>
 #include <QSet>
 #include <QFile>
 #include <QFileInfo>
@@ -958,7 +958,18 @@ int main(int argc, char* argv[])
         }
     }
 
+    const auto loadOffscreenPreviewFont = [] {
+        const int fontId = QFontDatabase::addApplicationFont(
+            QDir(qEnvironmentVariable("WINDIR")).filePath(QStringLiteral("Fonts/msyh.ttc")));
+        const QStringList families = QFontDatabase::applicationFontFamilies(fontId);
+        if (families.isEmpty())
+            return false;
+        QApplication::setFont(QFont(families.first(), 9));
+        return true;
+    };
     if (args.contains("--hotarutest") || args.contains("--hotarupreview")) {
+        if (args.contains("--hotarupreview") && QGuiApplication::platformName() == QLatin1String("offscreen"))
+            loadOffscreenPreviewFont();
         const int packageIndex=args.indexOf("--theme-package");
         return runHotaruSelftest(app,args.contains("--hotarupreview"),packageIndex>=0?args.value(packageIndex+1):QString());
     }
@@ -2453,16 +2464,28 @@ int main(int argc, char* argv[])
 #ifdef Q_OS_WIN
         if (args.contains(QStringLiteral("--preview-output"))
             && QGuiApplication::platformName() == QLatin1String("offscreen")) {
-            const int fontId = QFontDatabase::addApplicationFont(
-                QDir(qEnvironmentVariable("WINDIR")).filePath(QStringLiteral("Fonts/msyh.ttc")));
-            const QStringList families = QFontDatabase::applicationFontFamilies(fontId);
-            has("离屏预览载入中文字体", !families.isEmpty());
-            if (!families.isEmpty())
-                QApplication::setFont(QFont(families.first(), 9));
+            has("离屏预览载入中文字体", loadOffscreenPreviewFont());
         }
 #endif
         // 页面本身：更新操作隐藏禁用，仓库和发布页提供可用入口。
         AboutPage page;
+        const auto appIcon = Utils::appIcon();
+        const auto sizes = appIcon.availableSizes();
+        const auto* brand = page.findChild<QLabel*>(QStringLiteral("aboutAppIcon"));
+        const auto pixmap = brand ? brand->pixmap() : QPixmap();
+        has("关于页显示嵌入的应用图标",
+            brand && !pixmap.isNull() && QApplication::windowIcon().cacheKey() == appIcon.cacheKey()
+                && pixmap.toImage() == appIcon.pixmap(brand->size(), brand->devicePixelRatioF()).toImage());
+        has("应用图标具备托盘和高 DPI 所用的尺寸",
+            sizes.contains(QSize(16, 16)) && sizes.contains(QSize(32, 32))
+                && sizes.contains(QSize(64, 64)) && sizes.contains(QSize(128, 128)));
+        const auto rounded = appIcon.pixmap(32, 32).toImage();
+        has("应用图标四角透明，图案中心可见", !rounded.isNull()
+            && rounded.pixelColor(rounded.rect().topLeft()).alpha() == 0
+            && rounded.pixelColor(rounded.rect().topRight()).alpha() == 0
+            && rounded.pixelColor(rounded.rect().bottomLeft()).alpha() == 0
+            && rounded.pixelColor(rounded.rect().bottomRight()).alpha() == 0
+            && rounded.pixelColor(rounded.rect().center()).alpha() == 255);
         QSet<const QWidget*> laidOut;
         std::function<void(QLayout*)> walk = [&](QLayout* l) {
             if (!l)
@@ -2510,6 +2533,11 @@ int main(int argc, char* argv[])
               QStringLiteral("https://github.com/EienSakura/hotaru-launcher"));
         auto* repo = page.findChild<QPushButton*>(QStringLiteral("openRepository"));
         has("仓库按钮可用且布局包含它", repo && repo->isEnabled() && laidOut.contains(repo));
+        check("主题包固定从 v1.0.0 附件区下载", AboutPage::themePackagesPageUrl(),
+              QStringLiteral("https://github.com/EienSakura/hotaru-launcher/releases/tag/v1.0.0#assets"));
+        auto* themes = page.findChild<QPushButton*>(QStringLiteral("openThemePackages"));
+        has("主题包按钮可用且位于布局中", themes && themes->isEnabled() && laidOut.contains(themes)
+            && themes->toolTip() == AboutPage::themePackagesPageUrl());
         for (const char* objName : {"checkUpdate", "downloadUpdate", "installUpdate"}) {
             auto* button = page.findChild<QPushButton*>(QString::fromLatin1(objName));
             has("未验证的在线升级操作隐藏且禁用", button && button->isHidden() && !button->isEnabled());
@@ -2889,478 +2917,11 @@ int main(int argc, char* argv[])
         return bad;
     }
 
-    // --cfgcheck：离屏建一次配置页，把表单行名数一遍。
-    // 为什么要这条：这次「下载代理」在配置菜单里出现了两遍（回放历史时那一行被插了两次），
-    // 而配置页是 GUI —— 我不往他桌面上点，就只能把"某个行名出现几次"变成可断言的数字。
-    // 顺带盯住那行从来没生效过的「扫描根目录」别再被人加回来。沙箱 APPDATA，不碰真实配置。
+    // 设置页自测使用上文准备的隔离数据目录。
     if (args.contains("--cfgcheck")) {
-        int bad = 0;
-        ConfigPage page;
-        const auto labels = page.findChildren<QLabel*>();
-        const auto rowCount = [&labels](const QString& name) {
-            int n = 0;
-            for (const QLabel* l : labels)
-                if (l->text().trimmed() == name)
-                    ++n;
-            return n;
-        };
-        const auto hasRow = [&rowCount](const QString& name) { return rowCount(name) > 0; };
-        const auto say = [&bad](const char* what, bool ok, const QString& got) {
-            std::printf("%s %s：%s\n", ok ? "ok  " : "FAIL", what, got.toUtf8().constData());
-            if (!ok)
-                ++bad;
-            std::fflush(stdout);
-        };
-        const int proxy = rowCount(QStringLiteral("下载代理："));
-        say("「下载代理」只有一行", proxy == 1, QStringLiteral("数到 %1 行").arg(proxy));
-        const int installRoot = rowCount(QStringLiteral("第三方软件安装根目录："));
-        say("安装路径明确为第三方软件安装根目录", installRoot == 1,
-            QStringLiteral("数到 %1 行").arg(installRoot));
-        auto* hotkeyButton = page.findChild<QPushButton*>(QStringLiteral("hotkeyCaptureButton"));
-        auto* hotkeyMode = page.findChild<QComboBox*>(QStringLiteral("hotkeyMode"));
-        say("快捷键使用单一二级录入按钮",
-            hotkeyButton != nullptr && hotkeyMode == nullptr,
-            QStringLiteral("录入按钮=%1，旧模式框=%2")
-                .arg(hotkeyButton ? 1 : 0).arg(hotkeyMode ? 1 : 0));
-        const int roots = rowCount(QStringLiteral("扫描根目录："));
-        say("没生效过的「扫描根目录」已拿掉", roots == 0, QStringLiteral("数到 %1 行").arg(roots));
-        const bool hasList = hasRow(QStringLiteral("项目列表："));
-        const bool hasDepth = hasRow(QStringLiteral("往里找几层："));
-        say("应用那一栏在（列表 + 层数）", hasList && hasDepth,
-            QStringLiteral("项目列表=%1 往里找几层=%2").arg(hasList ? 1 : 0).arg(hasDepth ? 1 : 0));
-        int addExeBtn = 0;
-        int addDirBtn = 0;
-        for (QPushButton* b : page.findChildren<QPushButton*>()) {
-            if (b->objectName() == QStringLiteral("addAppExe"))
-                ++addExeBtn;
-            if (b->objectName() == QStringLiteral("addAppDir"))
-                ++addDirBtn;
-        }
-        say("「添加应用…」和「添加目录…」各只有一个", addExeBtn == 1 && addDirBtn == 1,
-            QStringLiteral("应用=%1 目录=%2").arg(addExeBtn).arg(addDirBtn));
-        const auto lists = page.findChildren<QListWidget*>();
-        say("列表控件真的建出来了", !lists.isEmpty(),
-            QStringLiteral("%1 个 QListWidget").arg(lists.size()));
-        // 上面那两条只数得到"控件建没建"，数不出"摆没摆进布局"。应用目录那一栏就是这么
-        // 在页面上隐身的：分组框 new 出来时认了 this 当父件，却从没 addWidget 到那一列，
-        // 于是标签 findChild 找得到、--cfgcheck 一片绿，界面上却一行都没有（2026-10-12 他报的）。
-        // 所以这条把"布局里能走到"当成结构不变量，逐个分组框验一遍，谁没挂上就点谁的名。
-        QSet<const QWidget*> laidOut;
-        std::function<void(QLayout*)> walk;
-        // 「访问一个控件」这件事只写一遍：它自己的布局 + 两种"内容不是布局项"的容器
-        //（滚动区的 viewport 件、tab 的每一页）。上一版这里只有 walk() 一条递归，
-        // 配置页拆成 通用/外观 两个 tab 之后当场把 7 个分组框全报成"没摆进布局" ——
-        // 因为 tab 的第一页本身就是那颗 QScrollArea，从它走只能拿到它自己的 layout()。
-        std::function<void(QWidget*)> visit = [&](QWidget* w) {
-            if (!w || laidOut.contains(w))
-                return;
-            laidOut.insert(w);
-            walk(w->layout());
-            if (auto* sc = qobject_cast<QScrollArea*>(w))   // 滚动区里那层不是布局项
-                if (sc->widget())
-                    visit(sc->widget());
-            if (auto* tw = qobject_cast<QTabWidget*>(w))    // tab 的非当前页也取不到布局项
-                for (int i = 0; i < tw->count(); ++i)
-                    visit(tw->widget(i));
-        };
-        walk = [&](QLayout* l) {
-            if (!l)
-                return;
-            for (int i = 0; i < l->count(); ++i) {
-                QLayoutItem* it = l->itemAt(i);
-                if (!it)
-                    continue;
-                if (QWidget* w = it->widget())
-                    visit(w);
-                else if (QLayout* sub = it->layout())
-                    walk(sub);
-            }
-        };
-        visit(&page);
-        QString orphans;
-        int groups = 0;
-        for (const QGroupBox* g : page.findChildren<QGroupBox*>()) {
-            ++groups;
-            if (!laidOut.contains(g))
-                orphans += QStringLiteral("「%1」").arg(g->title());
-        }
-        say("每个分组框都真的摆在布局里（没摆=界面上看不见）", orphans.isEmpty(),
-            orphans.isEmpty() ? QStringLiteral("%1 个分组框全在布局里").arg(groups) : orphans);
-        // ---- 2026-10-20 他把配置页拆成「通用 / 外观」两个 tab，日间夜间那颗搬进外观 ----
-        // 这三条盯的是搬家的形状，不是"有没有 tab"：
-        // ① 就两个、名字对得上（多一个少一个都算没照做）；
-        // ② 那两颗单选**在外观这一页上**（搬一半 = 界面上找不到，比不搬更糟）；
-        // ③ 通用那一页不许长出外观的东西、外观页只放外观和固定软件设置 ——
-        //    这条是防"以后加开关的人随手往外观页里塞下载代理"那种回潮。
-        {
-            auto* tabs = page.findChild<QTabWidget*>(QStringLiteral("cfgTabs"));
-            const QStringList tabNames = [&] {
-                QStringList n;
-                if (tabs)
-                    for (int i = 0; i < tabs->count(); ++i)
-                        n << tabs->tabText(i);
-                return n;
-            }();
-            say("配置页正好两个 tab，顺序是 通用/外观",
-                tabNames.join(QStringLiteral(" / ")) == QStringLiteral("通用 / 外观"),
-                tabNames.isEmpty() ? QStringLiteral("没找到 cfgTabs 那颗 QTabWidget")
-                                   : tabNames.join(QStringLiteral(" / ")));
-            QWidget* generalPage = tabs && tabs->count() > 0 ? tabs->widget(0) : nullptr;
-            QWidget* lookPage = tabs && tabs->count() > 1 ? tabs->widget(1) : nullptr;
-            const auto radios = page.findChildren<QRadioButton*>();
-            int onLook = 0, elsewhere = 0;
-            for (const QRadioButton* r : radios) {
-                if (lookPage && lookPage->isAncestorOf(const_cast<QRadioButton*>(r)))
-                    ++onLook;
-                else
-                    ++elsewhere;
-            }
-            say("夜间/日间那两颗单选都在「外观」这一页上（不在通用那一页）",
-                radios.size() == 2 && onLook == 2 && elsewhere == 0,
-                QStringLiteral("找到 %1 颗 · 在外观页 %2 颗 · 别处 %3 颗")
-                    .arg(radios.size()).arg(onLook).arg(elsewhere));
-            int generalGroups = 0, lookGroups = 0;
-            QStringList lookTitles;
-            for (QGroupBox* g : page.findChildren<QGroupBox*>()) {
-                if (generalPage && generalPage->isAncestorOf(g))
-                    ++generalGroups;
-                if (lookPage && lookPage->isAncestorOf(g)) {
-                    ++lookGroups;
-                    lookTitles << g->title();
-                }
-            }
-            say("外观页只包含「外观」和「固定软件」，其余分组均在通用页",
-                generalGroups == groups - 2 && lookGroups == 2
-                    && lookTitles.count(QStringLiteral("外观")) == 1
-                    && lookTitles.count(QStringLiteral("固定软件")) == 1,
-                QStringLiteral("通用页 %1 颗 · 外观页 %2 颗（%3）· 整页共 %4 颗")
-                    .arg(generalGroups).arg(lookGroups)
-                    .arg(lookTitles.join(QStringLiteral(" / "))).arg(groups));
-            auto* packages = page.findChild<QComboBox*>(QStringLiteral("themePackages"));
-            auto* pinned = page.findChild<QListWidget*>(QStringLiteral("pinnedApps"));
-            say("外观页可以选择内置主题并管理固定软件列表",
-                lookPage && packages && pinned && lookPage->isAncestorOf(packages)
-                    && lookPage->isAncestorOf(pinned)
-                    && packages->findData(QStringLiteral("hotaru-black")) >= 0,
-                QStringLiteral("主题选择器=%1 · 固定软件列表=%2")
-                    .arg(packages ? packages->count() : 0).arg(pinned ? 1 : 0));
-        }
-
-        // 「语言与环境」已剥离为独立插件，配置页不再塞入该分组框
-        {
-            QStringList titles;
-            for (const QGroupBox* g : page.findChildren<QGroupBox*>())
-                if (g->title().contains(QStringLiteral("语言")))
-                    titles << g->title();
-            say("配置页不再有「语言」分组框（已剥离至插件）", titles.isEmpty(),
-                titles.isEmpty() ? QStringLiteral("已剥离至插件") : titles.join(QStringLiteral("；")));
-        }
-
-        // 设置窗那一面：菜单只剩四行，而且每一行点开都真建出一张页。
-        // 这条盯的是"删掉四行菜单之后有没有留下点不开的空行"——残留入口就是没删干净。
-        {
-            SettingsDialog dlg;
-            dlg.setAttribute(Qt::WA_DontShowOnScreen, true);
-            auto* menu = dlg.findChild<QListWidget*>(QStringLiteral("menuList"));
-            QStringList names;
-            if (menu) {
-                for (int i = 0; i < menu->count(); ++i)
-                    names << menu->item(i)->text();
-            }
-            say("菜单正好四行、顺序是 快捷搜索/插件/配置/关于",
-                names.join(QStringLiteral(" / ")) == QStringLiteral("快捷搜索 / 插件 / 配置 / 关于"),
-                names.join(QStringLiteral(" / ")));
-            auto* stack = dlg.findChild<QStackedWidget*>();
-            int built = 0;
-            for (int i = 0; menu && i < menu->count(); ++i) {
-                menu->setCurrentRow(i);            // currentRowChanged → ensurePage，和真人点同一条路
-                QCoreApplication::processEvents();
-                QWidget* cur = stack ? stack->currentWidget() : nullptr;
-                if (cur && cur->findChildren<QWidget*>().size() > 1)
-                    ++built;
-            }
-            say("每一行点开都不是一块空面板", built == (menu ? menu->count() : 0),
-                QStringLiteral("有内容的 %1 / 共 %2 行").arg(built).arg(menu ? menu->count() : 0));
-
-            // 图标这一条确认四行都不再使用首字图标。底块颜色从图标自己身上取，
-            // 这样和 Utils::letterIcon(名字, 同一块色) 比才是公道的比法 —— 不然换个色就永远不等。
-            const auto imgOf = [](const QIcon& i) { return i.pixmap(48, 48).toImage(); };
-            const auto tileColor = [](const QImage& im) {
-                QMap<QRgb, int> hist;
-                for (int y = 0; y < im.height(); ++y)
-                    for (int x = 0; x < im.width(); ++x)
-                        if (qAlpha(im.pixel(x, y)) > 200)
-                            ++hist[QRgb(im.pixel(x, y))];
-                QRgb best = 0;
-                int n = -1;
-                for (auto it = hist.constBegin(); it != hist.constEnd(); ++it)
-                    if (it.value() > n) { n = it.value(); best = it.key(); }
-                return QColor(best);
-            };
-            QStringList vectorIcons, lettered;
-            for (int i = 0; menu && i < menu->count(); ++i) {
-                const QImage im = imgOf(menu->item(i)->icon());
-                const QImage asLetter = imgOf(Utils::letterIcon(menu->item(i)->text(), tileColor(im)));
-                (im == asLetter ? lettered : vectorIcons) << menu->item(i)->text();
-            }
-            say("设置侧栏四行都使用独立矢量图标",
-                vectorIcons.size() == (menu ? menu->count() : 0) && lettered.isEmpty(),
-                QStringLiteral("矢量=%1 文字=%2").arg(vectorIcons.join(QStringLiteral("、")),
-                                                       lettered.join(QStringLiteral("、"))));
-            // 改外观的东西要能看见，不能只剩一条断言：四颗图标拼成一条，铺在菜单那块深色底上存成 PNG。
-            // 数断言能证明"它不是第一个字"，证明不了"它看得出来是个袋子"。
-            {
-                const QString shots = QDir::tempPath() + QStringLiteral("/ltool-cfgshots");
-                QDir().mkpath(shots);
-                const int n = menu ? menu->count() : 0;
-                QPixmap strip(48 * n, 64);
-                strip.fill(QColor(30, 32, 38));
-                QPainter sp(&strip);
-                for (int i = 0; i < n; ++i)
-                    sp.drawPixmap(48 * i + 8, 8, menu->item(i)->icon().pixmap(40, 40));
-                sp.end();
-                const QString file = shots + QStringLiteral("/menu-icons.png");
-                say("四颗菜单图标存成了一张 PNG（肉眼复核用）", strip.save(file, "PNG"),
-                    QStringLiteral("%1 · %2x%3").arg(file).arg(strip.width()).arg(strip.height()));
-            }
-        }
-        // 悬停说明（tooltip）的深色：他报的是"夜间模式鼠标悬停说明，灰字压白底完全看不见字"。
-        // 量不了像素 —— 离屏看不到 windows11 风格那层**系统浅底**（2026-10-17 那次菜单判据就栽在
-        // 这儿，见 captureselftest 里 makeStyledMenu 那段注释），所以量的是"真挂上去的那条规则里
-        // 到底写了什么"：挂在 qApp 上（tooltip 是独立顶层窗口，挂在某个窗口上管不到它），
-        // 并且底色和字色两头都写死、亮差够大。撤掉 main() 里那句 setStyleSheet，这两条立刻红。
-        {
-            const QString css = qApp->styleSheet();
-            say("悬停说明的样式挂在 qApp 上（不是某个窗口）",
-                css.contains(QLatin1String("QToolTip")), QStringLiteral("qApp 样式表长度=%1").arg(css.size()));
-            const int from = css.indexOf(QLatin1String("QToolTip"));
-            const QString block = from < 0 ? QString()
-                                           : css.mid(from, css.indexOf(QLatin1Char('}'), from) - from);
-            const auto hexOf = [block](const QString& prop) {
-                const QRegularExpression re(QStringLiteral("%1:\\s*#([0-9a-fA-F]{6})").arg(prop));
-                const auto m = re.match(block);
-                return m.hasMatch() ? QColor(QStringLiteral("#") + m.captured(1)) : QColor();
-            };
-            const QColor bg = hexOf(QStringLiteral("background"));
-            const QColor fg = hexOf(QStringLiteral("color"));
-            say("那条规则里字比底色亮出一大截（看得清）",
-                bg.isValid() && fg.isValid() && fg.lightness() - bg.lightness() > 120,
-                QStringLiteral("底=%1 字=%2 亮差=%3")
-                    .arg(bg.name(), fg.name())
-                    .arg(bg.isValid() && fg.isValid() ? fg.lightness() - bg.lightness() : -999));
-        }
-        // ---- 夜间 / 日间（2026-10-20 他点名要配置页那颗切换）----
-        // 这套判据钉的是"切换真的换了颜色、而且可逆、而且落盘"，不是"有个控件在那"。
-        {
-            const int themeRows = rowCount(QStringLiteral("外观："));
-            const auto radios = page.findChildren<QRadioButton*>();
-            QStringList radioNames;
-            int checked = 0;
-            for (const QRadioButton* r : radios) {
-                radioNames << r->text();
-                if (r->isChecked())
-                    ++checked;
-            }
-            say("「外观」那一行只有一行，里面两颗单选",
-                themeRows == 1 && radioNames.size() == 2,
-                QStringLiteral("行数=%1 单选=%2").arg(themeRows).arg(radioNames.join(QStringLiteral("/"))));
-            say("默认是夜间（这一版之前的行为，不该被切换功能改掉）",
-                Theme::current() == Theme::Mode::Dark && checked == 1,
-                QStringLiteral("current=%1 选中数=%2").arg(Theme::name(Theme::current())).arg(checked));
-
-            const QColor darkWindow = Theme::color("window");
-            const QString darkTip = qApp->styleSheet();
-            // 拨到日间
-            Theme::setMode(Theme::Mode::Light);
-            const QColor lightWindow = Theme::color("window");
-            const QColor palWindow = qApp->palette().color(QPalette::Window);
-            say("切到日间：current 跟着变，调色板也真的换了",
-                Theme::current() == Theme::Mode::Light && palWindow == lightWindow
-                    && lightWindow != darkWindow,
-                QStringLiteral("夜底=%1 日底=%2 调色板=%3").arg(darkWindow.name(), lightWindow.name(),
-                                                               palWindow.name()));
-            {
-                const QColor text = Theme::color("text");
-                const int delta = qAbs(text.lightness() - lightWindow.lightness());
-                say("日间那份正文压在窗口底上够亮差（和夜间同一条口径 >120）",
-                    delta > 120, QStringLiteral("底=%1 字=%2 亮差=%3")
-                                      .arg(lightWindow.name(), text.name()).arg(delta));
-            }
-            say("切到日间：挂在 qApp 上的悬停说明跟着换底色（那一份是独立顶层窗口，只能靠它）",
-                !qApp->styleSheet().isEmpty() && qApp->styleSheet() != darkTip
-                    && qApp->styleSheet().contains(Theme::color("field").name().mid(1),
-                                                   Qt::CaseInsensitive),
-                QStringLiteral("新样式表长度=%1").arg(qApp->styleSheet().size()));
-            {
-                QSettings cfg(Utils::dataDir() + "/config.ini", QSettings::IniFormat);
-                const QString stored = cfg.value("ui/theme").toString();
-                say("切换是落盘的（重开程序还认），不是只改内存",
-                    stored.compare(QLatin1String("light"), Qt::CaseInsensitive) == 0,
-                    QStringLiteral("config.ini ui/theme=%1").arg(stored));
-            }
-            // 反向：拨回夜间，一切得回到原值 —— 不然就是单向棘轮
-            Theme::setMode(Theme::Mode::Dark);
-            say("拨回夜间：底色/样式表一字不差回到原来那一份（不是单向的）",
-                Theme::color("window") == darkWindow && qApp->styleSheet() == darkTip,
-                QStringLiteral("底=%1 样式表回到原样=%2")
-                    .arg(Theme::color("window").name())
-                    .arg(qApp->styleSheet() == darkTip ? 1 : 0));
-            // expand() 那一步：认得的名字换成值，认不出的原样留着（写错 token 时看得见）
-            {
-                const QString probe = Theme::expand("@window and @nope");
-                say("样式表里的 @token 换成值；写错的名字原样留着，不许静默变空",
-                    probe == QStringLiteral("%1 and @nope").arg(Theme::color("window").name()),
-                    QStringLiteral("得到 %1").arg(probe));
-            }
-            // 前缀陷阱：这张表里有 5 对"一个是另一个的前缀"的角色
-            //（card/cardLine、accent/accentUp/accentDown、group/groupText、
-            //  disabled/disabledLine、border/borderHi/borderHiUp）。
-            // 按表顺序挨个 replace 的话，`@cardLine` 会先被 `@card` 吃掉，剩下一个
-            // `<card 的值>Line` 混在 QSS 里 —— 界面上是"边框颜色不对"，日志里一个字都没有。
-            {
-                const QString probe = Theme::expand(
-                    QStringLiteral("%1|%2|%3|%4|%5|%6|%7|%8")
-                        .arg(QStringLiteral("@card"), QStringLiteral("@cardLine"),
-                             QStringLiteral("@accent"), QStringLiteral("@accentUp"),
-                             QStringLiteral("@group"), QStringLiteral("@groupText"),
-                             QStringLiteral("@border"), QStringLiteral("@borderHi")));
-                const QString want = QStringLiteral("%1|%2|%3|%4|%5|%6|%7|%8")
-                    .arg(Theme::token("card"), Theme::token("cardLine"),
-                         Theme::token("accent"), Theme::token("accentUp"),
-                         Theme::token("group"), Theme::token("groupText"),
-                         Theme::token("border"), Theme::token("borderHi"));
-                say("长名字的角色不被它的短前缀抢走（@cardLine 不等于 @card 拼上 \"Line\"）",
-                    probe == want && !probe.contains(QLatin1String("LineLine"))
-                        && !probe.contains(QLatin1String("UpUp")),
-                    QStringLiteral("得到 %1").arg(probe));
-            }
-            // Theme::bind 的那份样式表要能在切换时自己重挂，而且**子控件**也得收到通知 ——
-            // 样式表挂在具体控件身上，只给顶层窗口发事件的话，配置页里的控件全是老颜色。
-            {
-                auto* win = new QWidget(nullptr);
-                win->setObjectName(QStringLiteral("themeBindProbe"));
-                auto* inner = new QLabel(QStringLiteral("探针"), win);
-                auto* lay = new QVBoxLayout(win);
-                lay->addWidget(inner);
-                Theme::bind(inner, "color: @text; background: @window;");
-                const QString nightQss = inner->styleSheet();
-                Theme::setMode(Theme::Mode::Light);
-                const QString dayQss = inner->styleSheet();
-                const bool followsMode = nightQss != dayQss
-                    && dayQss.contains(Theme::color("text").name(), Qt::CaseInsensitive)
-                    && dayQss.contains(Theme::color("window").name(), Qt::CaseInsensitive)
-                    && nightQss.contains(QStringLiteral("#1b1c20"), Qt::CaseInsensitive);
-                Theme::setMode(Theme::Mode::Dark);
-                const bool reversible = inner->styleSheet() == nightQss;
-                delete win;
-                say("挂在子控件上的那份样式表（Theme::bind）会跟着切换重挂，不是只有顶层窗口变脸",
-                    followsMode && reversible,
-                    QStringLiteral("夜间=%1 日间=%2 拨回来=%3")
-                        .arg(nightQss, dayQss).arg(reversible ? QStringLiteral("原样")
-                                                              : QStringLiteral("没回来")));
-            }
-            // 最后这一条不看样式表文本，看**渲出来的像素**：两种模式各截一张配置页存成 PNG，
-            // 再量整张的平均亮度。为什么要多这一条 —— 前面那些判据量的是"字符串里写的是哪个色号"，
-            // 而样式表写得对、画出来还是黑的是可能的（那份 QSS 没挂到这个控件上、或者控件用的是
-            // 调色板不是样式表）。2026-10-20 加切换时就是把颜色从 380 处字面量搬进角色名，
-            // 这类"搬漏一处"只有像素能抓到。
-            {
-                const QString shots = QDir::tempPath() + QStringLiteral("/ltool-cfgshots");
-                QDir().mkpath(shots);
-                // 渲的是**整扇设置窗**（左边菜单 + 右边那张页），不是光一张 ConfigPage ——
-                // 2026-10-20 他回"太丑了太难受了"看的就是这个整体，只渲单页会漏掉
-                // 菜单那一列和页眉跟内容之间的配色关系。
-                SettingsDialog dlg;
-                dlg.setAttribute(Qt::WA_DontShowOnScreen, true);
-                dlg.resize(1140, 790);
-                if (auto* menu = dlg.findChild<QListWidget*>(QStringLiteral("menuList")))
-                    menu->setCurrentRow(2);   // 「配置」那一行，走的是真人点的那条路
-                QCoreApplication::processEvents();
-                const auto meanLightness = [&dlg](const QString& file) {
-                    const QPixmap pm = dlg.grab();
-                    const QImage img = pm.toImage().convertToFormat(QImage::Format_RGB32);
-                    pm.save(file, "PNG");
-                    long long sum = 0, n = 0;
-                    for (int y = 0; y < img.height(); y += 4) {
-                        const QRgb* line = reinterpret_cast<const QRgb*>(img.constScanLine(y));
-                        for (int x = 0; x < img.width(); x += 4, ++line) {
-                            sum += qGray(*line);
-                            ++n;
-                        }
-                    }
-                    return n > 0 ? int(sum / n) : -1;
-                };
-                Theme::setMode(Theme::Mode::Dark);
-                const int night = meanLightness(shots + QStringLiteral("/theme-night.png"));
-                Theme::setMode(Theme::Mode::Light);
-                const int day = meanLightness(shots + QStringLiteral("/theme-day.png"));
-                // 再补一张「外观」那一页单独的图：拆 tab 之后只截第一页就等于没截到新东西，
-                // 而"这一页是不是空得只剩一行"必须用眼睛过一遍，不能只靠上面那条数分组框。
-                if (auto* tw = dlg.findChild<QTabWidget*>(QStringLiteral("cfgTabs"))) {
-                    tw->setCurrentIndex(1);
-                    QCoreApplication::processEvents();
-                    const QPixmap pm = dlg.grab();
-                    pm.save(shots + QStringLiteral("/theme-look-tab.png"), "PNG");
-                    tw->setCurrentIndex(0);
-                }
-                Theme::setMode(Theme::Mode::Dark);
-                say("两种模式各渲一整扇设置窗，日间那张整张平均亮度明显更亮（量的是像素不是字符串）",
-                    night >= 0 && day - night > 60,
-                    QStringLiteral("夜间平均灰度=%1 日间=%2 差=%3 · PNG 在 %4")
-                        .arg(night).arg(day).arg(day - night).arg(shots));
-            }
-            // 启动器那扇是 WA_TranslucentBackground + 无边框 —— 也就是说"搜索框在哪儿"
-            // 这件事**只由那一圈 1px 描边**说给他看。2026-10-20 他第一句反馈就是
-            // "这个白色不好，完全看不清搜索框的边框"：日间那份底是纯白、描边是黑压 26/255，
-            // 两者差 1.15:1，等于没有。所以这条量的就是渲染出来的**描边那一行 vs 紧贴里面的底**，
-            // 按 WCAG 1.4.11（非文本对比度 ≥3:1）判，两个模式各判一次。
-            // 这条不读 Theme 里的任何常量，读的是 grab() 出来的像素 —— 换个画法它就红。
-            {
-                auto* launcher = new SearchWindow;
-                const QString shots = QDir::tempPath() + QStringLiteral("/ltool-cfgshots");
-                launcher->resize(560, 300);
-                // 亮度/对比度的算法在 Theme 里只有一份（原来这里抄过一份局部 lambda，
-                // 剪贴板那张卡也要问同样的问题，就来第二处 —— 搬进 Theme 收掉）。
-                const auto edgeContrast = [launcher](const QString& file, QString* why) {
-                    const QPixmap pm = launcher->grab();
-                    const QImage img = pm.toImage().convertToFormat(QImage::Format_ARGB32);
-                    pm.save(file, "PNG");
-                    // 沿**左边缘那一列**、竖着中间那一行取点：路径是 QRectF(0.5, 0.5, …) 配
-                    // 1px 画笔 → 描边正好盖满第 0 列（上下那两行不行，那里有 13px 圆角，
-                    // 第一版我从顶行取，日间那颗底一变成不透明就"描边和底同一行"了）。
-                    // Format_ARGB32 非预乘，所以第 0 列的 r/g/b 就是描边本身的颜色；
-                    // 往里第 8 列过了布局那 14px 左边距的空白区，是纯窗口底。
-                    const int cy = img.height() / 2;
-                    if (qAlpha(img.pixel(0, cy)) == 0 || qAlpha(img.pixel(8, cy)) == 0) {
-                        *why = QStringLiteral("第 0 列或第 8 列在这一行是空的（窗口没画满？）");
-                        return -1.0;
-                    }
-                    const QRgb e = img.pixel(0, cy);
-                    const QRgb f = img.pixel(8, cy);
-                    *why = QStringLiteral("描边=%1 底=%2").arg(QColor(e).name(), QColor(f).name());
-                    return Theme::contrast(e, f);
-                };
-                Theme::setMode(Theme::Mode::Dark);
-                QString whyN;
-                const double cn = edgeContrast(shots + QStringLiteral("/launcher-night.png"), &whyN);
-                Theme::setMode(Theme::Mode::Light);
-                QString whyD;
-                const double cd = edgeContrast(shots + QStringLiteral("/launcher-day.png"), &whyD);
-                Theme::setMode(Theme::Mode::Dark);
-                delete launcher;
-                // 日间按 WCAG 1.4.11（非文本对比度）要 ≥3:1；夜间那颗 1.86:1 是这一版一直以来
-                // 的样子，他这次点的是"这个白色不好"、没说要改夜里 —— 所以夜里这条只钉
-                // "别再变糊"，不拿 3:1 去动他用了很久的默认外观。
-                say("启动器那圈描边和它自己的底差得开（无边框窗，看得见边=看得见框）："
-                    "日间 ≥3:1、夜间只钉住不比现在这份更糊",
-                    cd >= 3.0 && cn >= 1.8,
-                    QStringLiteral("夜间 %1:1（%2）· 日间 %3:1（%4）")
-                        .arg(cn, 0, 'f', 2).arg(whyN).arg(cd, 0, 'f', 2).arg(whyD));
-            }
-        }
-        std::printf("cfgcheck: 失败 %d 项\n", bad);
-        std::fflush(stdout);
-        return bad;
+        if (QGuiApplication::platformName() != QLatin1String("windows"))
+            loadOffscreenPreviewFont();
+        return runHotaruSettingsSelftest(args);
     }
 
     // --seamtest：平台层那两道缝本身的可观测行为（src/platform/Paths.h、Launch.h）。
@@ -5691,6 +5252,7 @@ int main(int argc, char* argv[])
 
     // 设置页修改快捷键 → 重新注册
     auto applyHotkeyChange = [&](const QString& seq) {
+        win.setProperty(kSettingsHotkeyApplied, false);
         UINT nm = 0, nv = 0;
         unregisterCurrent();
         const bool doubleCtrl = seq.compare(QStringLiteral("Ctrl+Ctrl"), Qt::CaseInsensitive) == 0;
@@ -5723,6 +5285,7 @@ int main(int argc, char* argv[])
         hotkeyLabel = seq;
         preferred = seq;
         preferredDoubleCtrl = doubleCtrl;
+        win.setProperty(kSettingsHotkeyApplied, true);
         win.setHotkeyLabel(seq);
         updateMenuHotkey();
         Utils::log(QString("hotkey changed to %1").arg(seq));

@@ -6,9 +6,9 @@
 
 ## 分发与安装
 
-主题使用**本项目 GitHub Release 的独立 ZIP 附件**，与主程序分开下载和安装。目前不建立独立主题仓库，也不将主题资源打入主程序安装器。主题包可以使用独立版本号，发行说明应标明主题版本、最低 Hotaru 版本、作者、素材来源及授权信息。
+主题使用**本项目 GitHub Release 的独立 ZIP 附件**，统一放在 [v1.0.0 的附件区](https://github.com/EienSakura/hotaru-launcher/releases/tag/v1.0.0#assets)，与主程序分开下载和安装。主题包可以使用独立版本号，发行说明应标明主题版本、最低 Hotaru 版本、作者、素材来源及授权信息。
 
-主题 ZIP 和第三方素材不进入源码 Git 历史。Release 附件与 GitHub 自动生成的源码 ZIP 是不同的下载项，不要把源码 ZIP 当成主题安装；参阅 [GitHub Release 说明](https://docs.github.com/en/repositories/releasing-projects-on-github/about-releases)。主题须由维护者主动上传到同标签的 Release 草稿，源码 CI 不自动收集素材；自动发布会保留这些显式提供的附件并将它们纳入 `sha256.txt`。附件文件名使用 `Hotaru-theme-` 前缀及英文字母、数字、点、下划线或短横线，例如 `Hotaru-theme-2233-1.4.2.zip`，清单中的显示名称可以使用中文。
+主题 ZIP 和第三方素材不进入源码 Git 历史。Release 附件与 GitHub 自动生成的源码 ZIP 是不同的下载项，不要把源码 ZIP 当成主题安装；参阅 [GitHub Release 说明](https://docs.github.com/en/repositories/releasing-projects-on-github/about-releases)。主题由维护者上传到 `v1.0.0`，源码 CI 不自动收集素材。自动发布会保留已提供的附件并将它们纳入 `sha256.txt`，发布后新增附件时也需同步更新校验清单。附件文件名使用 `Hotaru-theme-` 前缀及英文字母、数字、点、下划线或短横线，例如 `Hotaru-theme-2233-1.4.2.zip`，清单中的显示名称可以使用中文。
 
 2233娘主题包以独立 ZIP 附件提供，原始素材权利归原作者；项目源码的 Apache-2.0 许可证不涵盖第三方素材。维护者应确认素材再分发权限。程序无需依赖该包即可构建和运行。
 

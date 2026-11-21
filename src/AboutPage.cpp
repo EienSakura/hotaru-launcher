@@ -1,4 +1,5 @@
 #include "AboutPage.h"
+#include "SettingsIcons.h"
 
 #include "DevEnv.h"
 #include "DownloadManager.h"
@@ -51,45 +52,68 @@ AboutPage::AboutPage(QWidget* parent)
 {
     setObjectName(QStringLiteral("aboutPage"));
     auto* lay = new QVBoxLayout(this);
-    lay->setContentsMargins(20, 18, 20, 18);
-    lay->setSpacing(16);
+    lay->setContentsMargins(30, 20, 30, 18);
+    lay->setSpacing(12);
 
-    auto* head = new QLabel(QStringLiteral("关于 萤 Hotaru"), this);
+    auto* head = new QLabel(QStringLiteral("关于"), this);
     head->setObjectName(QStringLiteral("pageTitle"));
     lay->addWidget(head);
+    auto* intro = new QLabel(QStringLiteral("查看 Hotaru 的版本、项目链接与运行信息。"), this);
+    intro->setObjectName(QStringLiteral("muted"));
+    lay->addWidget(intro);
 
     const auto card = [this]() {
         auto* frame = new QFrame(this);
         frame->setObjectName(QStringLiteral("aboutCard"));
-        Theme::bind(frame,
+        Theme::bindSettings(frame,
             "QFrame#aboutCard { background: @group; border: 1px solid @line; border-radius: 12px; }"
-            "QFrame#aboutCard QLabel { background: transparent; border: none; color: @text; }");
+            "QFrame#aboutCard QLabel { background: transparent; border: none; color: @text; }"
+            "QFrame#aboutCard QLabel#muted { color: @muted; }");
         return frame;
     };
+    auto* appSection = new QLabel(QStringLiteral("应用"), this);
+    appSection->setObjectName(QStringLiteral("settingsRowTitle"));
+    lay->addWidget(appSection);
     auto* hero = card();
     auto* heroLayout = new QVBoxLayout(hero);
-    heroLayout->setContentsMargins(22, 22, 22, 22);
-    heroLayout->setSpacing(16);
+    heroLayout->setContentsMargins(15, 12, 15, 12);
+    heroLayout->setSpacing(11);
     auto* identity = new QHBoxLayout;
-    identity->setSpacing(16);
+    identity->setSpacing(10);
     auto* icon = new QLabel(hero);
-    icon->setFixedSize(56, 56);
-    icon->setPixmap(Utils::appIcon().pixmap(QSize(56, 56), devicePixelRatioF()));
-    identity->addWidget(icon);
+    icon->setObjectName(QStringLiteral("aboutAppIcon"));
+    icon->setFixedSize(39, 39);
+    icon->setPixmap(Utils::appIcon().pixmap(QSize(39, 39), devicePixelRatioF()));
+    identity->addWidget(icon, 0, Qt::AlignVCenter);
     auto* brand = new QVBoxLayout;
+    brand->setSpacing(2);
     auto* name = new QLabel(QStringLiteral("萤 Hotaru"), hero);
-    Theme::bind(name, "font-size: 22pt; font-weight: 600; color: @text;");
+    Theme::bindSettings(name, "font-size: 13pt; font-weight: 600; color: @text;");
     brand->addWidget(name);
-    auto* description = new QLabel(QStringLiteral("让常用应用，触手可及。"), hero);
-    Theme::bind(description, "font-size: 10pt; color: @muted;");
+    auto* description = new QLabel(QStringLiteral("Windows 桌面启动器"), hero);
+    description->setObjectName(QStringLiteral("muted"));
     brand->addWidget(description);
     identity->addLayout(brand, 1);
     auto* version = new QLabel(QStringLiteral("v%1").arg(currentVersion()), hero);
     version->setObjectName(QStringLiteral("aboutVersion"));
-    Theme::bind(version, "background: @field; color: @text; border-radius: 8px; padding: 6px 12px; font-size: 10pt;");
-    identity->addWidget(version, 0, Qt::AlignTop);
+    Theme::bindSettings(version, "background: @field; color: @muted; border: 1px solid @line; border-radius: 6px; padding: 3px 8px;");
+    identity->addWidget(version, 0, Qt::AlignVCenter);
     heroLayout->addLayout(identity);
+    auto* divider = new QFrame(hero);
+    divider->setFixedHeight(1);
+    Theme::bindSettings(divider, "background: @line;");
+    heroLayout->addWidget(divider);
     auto* links = new QHBoxLayout;
+    links->addWidget(new SettingsIconTile(SettingsGlyph::Info, hero));
+    auto* linksCopy = new QVBoxLayout;
+    linksCopy->setSpacing(3);
+    auto* linksTitle = new QLabel(QStringLiteral("项目与发行"), hero);
+    linksTitle->setObjectName(QStringLiteral("settingsRowTitle"));
+    linksCopy->addWidget(linksTitle);
+    auto* linksHint = new QLabel(QStringLiteral("查看源代码、更新说明和安装包。"), hero);
+    linksHint->setObjectName(QStringLiteral("muted"));
+    linksCopy->addWidget(linksHint);
+    links->addLayout(linksCopy, 1);
     auto* repository = new QPushButton(QStringLiteral("GitHub 仓库  ↗"), hero);
     repository->setObjectName(QStringLiteral("openRepository"));
     repository->setToolTip(repositoryUrl());
@@ -100,29 +124,29 @@ AboutPage::AboutPage(QWidget* parent)
     m_page = new QPushButton(QStringLiteral("版本发布  ↗"), hero);
     m_page->setObjectName(QStringLiteral("openReleases"));
     m_page->setCursor(Qt::PointingHandCursor);
+    const char* linkButtonStyle =
+        "QPushButton { background: @button; color: @text; border: 1px solid @borderHi;"
+        "border-radius: 8px; padding: 6px 12px; }"
+        "QPushButton:hover, QPushButton:focus { background: @hover; border-color: @accent; }";
     for (auto* button : {repository, m_page}) {
-        Theme::bind(button,
-            "QPushButton { background: @button; color: @text; border: 1px solid @borderHi;"
-            "border-radius: 7px; padding: 7px 16px; }"
-            "QPushButton:hover { background: @buttonUp; border-color: @accent; }");
+        Theme::bindSettings(button, linkButtonStyle);
         links->addWidget(button);
     }
-    links->addStretch(1);
     heroLayout->addLayout(links);
     lay->addWidget(hero);
 
+    auto* detailsTitle = new QLabel(QStringLiteral("本机信息"), this);
+    detailsTitle->setObjectName(QStringLiteral("settingsRowTitle"));
+    lay->addWidget(detailsTitle);
     auto* details = card();
     auto* detailsLayout = new QVBoxLayout(details);
-    detailsLayout->setContentsMargins(22, 18, 22, 20);
-    detailsLayout->setSpacing(14);
-    auto* detailsTitle = new QLabel(QStringLiteral("本机信息"), details);
-    Theme::bind(detailsTitle, "font-size: 11pt; font-weight: 600; color: @text;");
-    detailsLayout->addWidget(detailsTitle);
+    detailsLayout->setContentsMargins(15, 12, 15, 12);
+    detailsLayout->setSpacing(10);
     auto* form = new QFormLayout;
     form->setHorizontalSpacing(20);
-    form->setVerticalSpacing(12);
+    form->setVerticalSpacing(11);
     form->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
-    form->setLabelAlignment(Qt::AlignRight | Qt::AlignVCenter);
+    form->setLabelAlignment(Qt::AlignLeft | Qt::AlignVCenter);
     const auto value = [details](const QString& text) {
         auto* label = new QLabel(text, details);
         label->setTextInteractionFlags(Qt::TextSelectableByMouse);
@@ -144,6 +168,32 @@ AboutPage::AboutPage(QWidget* parent)
     form->addRow(QStringLiteral("运行日志："), value(Utils::dataDir() + "/log.txt"));
     detailsLayout->addLayout(form);
     lay->addWidget(details);
+
+    auto* themes = card();
+    auto* themeRow = new QHBoxLayout(themes);
+    themeRow->setContentsMargins(15, 11, 15, 11);
+    themeRow->setSpacing(11);
+    themeRow->addWidget(new SettingsIconTile(SettingsGlyph::Palette, themes));
+    auto* themeCopy = new QVBoxLayout;
+    themeCopy->setSpacing(3);
+    auto* themeTitle = new QLabel(QStringLiteral("主题包"), themes);
+    themeTitle->setObjectName(QStringLiteral("settingsRowTitle"));
+    themeCopy->addWidget(themeTitle);
+    auto* themeHint = new QLabel(QStringLiteral("下载后，在「配置 → 外观」点击「导入 ZIP…」安装。"), themes);
+    themeHint->setObjectName(QStringLiteral("muted"));
+    themeHint->setWordWrap(true);
+    themeCopy->addWidget(themeHint);
+    themeRow->addLayout(themeCopy, 1);
+    auto* themeLink = new QPushButton(QStringLiteral("下载主题包  ↗"), themes);
+    themeLink->setObjectName(QStringLiteral("openThemePackages"));
+    themeLink->setToolTip(themePackagesPageUrl());
+    themeLink->setCursor(Qt::PointingHandCursor);
+    Theme::bindSettings(themeLink, linkButtonStyle);
+    connect(themeLink, &QPushButton::clicked, this, [] {
+        QDesktopServices::openUrl(QUrl(themePackagesPageUrl()));
+    });
+    themeRow->addWidget(themeLink);
+    lay->addWidget(themes);
 
     m_status = new QLabel(QStringLiteral("暂未启用应用内更新，可前往仓库查看版本发布。"), this);
     m_status->setObjectName(QStringLiteral("updateStatus"));
@@ -208,6 +258,11 @@ QString AboutPage::repositoryUrl()
 {
     return QStringLiteral("https://github.com/%1/%2")
         .arg(QLatin1String(kRepoOwner), QLatin1String(kRepoName));
+}
+
+QString AboutPage::themePackagesPageUrl()
+{
+    return repositoryUrl() + QStringLiteral("/releases/tag/v1.0.0#assets");
 }
 
 QString AboutPage::currentVersion()

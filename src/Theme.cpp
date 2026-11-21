@@ -3,16 +3,35 @@
 
 #include "Archives.h"
 #include "PinnedApps.h"
+#include "SettingsControlStyle.h"
+#include "SettingsFrame.h"
+#include "SettingsIcons.h"
+#include "SettingsPalette.h"
 #include "Utils.h"
 
 #include <QApplication>
+#include <QBoxLayout>
 #include <QCoreApplication>
 #include <QEvent>
+#include <QDialogButtonBox>
+#include <QAbstractSpinBox>
+#include <QComboBox>
+#include <QFrame>
+#include <QLabel>
+#include <QLayout>
+#include <QLineEdit>
+#include <QMenu>
+#include <QMouseEvent>
+#include <QPushButton>
+#include <QSizeGrip>
+#include <QToolButton>
+#include <QWindow>
 #include <QInputDialog>
 #include <QMessageBox>
 #include <QFile>
 #include <QPalette>
 #include <QRegularExpression>
+#include <QScopedValueRollback>
 #include <QSettings>
 #include <QWidget>
 #include <QPair>
@@ -27,6 +46,8 @@
 #include <QSaveFile>
 #include <QUrl>
 #include <QUuid>
+#include <windows.h>
+#include <dwmapi.h>
 
 #include <cmath>
 
@@ -37,11 +58,12 @@ struct Role { const char* name; const char* dark; const char* light; };
 
 // 弹层那两份 QSS 只在这里存一份：`menuStyle()`/`tipStyle()` 是"当场算一次"，
 // `bindMenu()`/`applyToApp()` 走的是同一份 token 串，所以切模式时挂过的那批会跟着重挂。
+constexpr int kMenuRadius = 8;
 const char* const kMenuQss =
     "QMenu { background: @field; border: 1px solid @border; border-radius: 8px;"
     " padding: 4px; color: @text; font-size: 10pt; }"
-    "QMenu::item { padding: 6px 20px 6px 12px; border-radius: 6px; }"
-    "QMenu::item:selected { background: @accent; color: @onAccent; }"
+    "QMenu::item { padding: 5px 19px 5px 11px; border: 1px solid transparent; border-radius: 6px; }"
+    "QMenu::item:selected { background: @accent; border-color: @accent; color: @onAccent; }"
     "QMenu::separator { height: 1px; background: @border; margin: 4px 6px; }";
 
 const char* const kTipQss =
@@ -53,17 +75,183 @@ const char* const kDialogQss = R"QSS(
 QDialog { background: @window; color: @text; }
 QLabel { background: transparent; color: @text; }
 QPushButton { background: @button; color: @text; border: 1px solid @border;
-    border-radius: 6px; padding: 6px 14px; min-width: 64px; }
+    border-radius: 8px; padding: 7px 14px; min-width: 64px; outline: none; }
 QPushButton:hover { background: @hover; }
 QPushButton:pressed { background: @pressed; }
 QPushButton:default, QPushButton:focus { border-color: @accent; }
+QPushButton[hotaruPrimary="true"]:enabled { background: @primary; color: @onPrimary; border-color: @primary; }
+QPushButton[hotaruPrimary="true"]:enabled:hover { background: @accent; }
+QPushButton[hotaruPrimary="true"]:enabled:focus { border-color: @text; }
 QPushButton:disabled { background: @field; color: @disabled; }
-QLineEdit, QTextEdit, QPlainTextEdit, QSpinBox, QComboBox {
+QDialog[hotaruModalDialog="false"] QLineEdit, QDialog[hotaruModalDialog="false"] QSpinBox,
+QDialog[hotaruModalDialog="false"] QComboBox, QInputDialog QLineEdit,
+QInputDialog QSpinBox, QInputDialog QDoubleSpinBox, QTextEdit, QPlainTextEdit {
     background: @field; color: @text; border: 1px solid @border;
-    border-radius: 5px; padding: 5px; selection-background-color: @accent;
-    selection-color: @onAccent; }
+    border-radius: 8px; padding: 6px 9px; selection-background-color: @primary;
+    selection-color: @onPrimary; }
+QDialog[hotaruModalDialog="false"] QLineEdit:focus, QDialog[hotaruModalDialog="false"] QSpinBox:focus,
+QDialog[hotaruModalDialog="false"] QComboBox:focus, QTextEdit:focus, QPlainTextEdit:focus { border-color: @accent; }
 QCheckBox { color: @text; background: transparent; }
+QLabel#modalHint { color: @muted; }
+QLabel#modalError { color: @bad; }
+QListWidget { background: @group; color: @text; border: 1px solid @line; border-radius: 8px; }
+QListWidget::item { padding: 5px 8px; border-radius: 6px; }
+QListWidget::item:selected { color: @text; background: @selBg; }
+QPlainTextEdit#installLogOutput { font-family: Consolas, monospace; }
+QLabel#hotaruModalTitle { font-size: 13pt; font-weight: 600; }
+QToolButton#hotaruModalClose { background: transparent; border: 1px solid transparent; border-radius: 6px; }
+QToolButton#hotaruModalClose:hover { background: @hover; }
 )QSS";
+
+constexpr int kModalHeaderHeight = 44;
+constexpr int kModalRadius = 14;
+
+class ModalFrame final : public QWidget
+{
+public:
+    explicit ModalFrame(QDialog* dialog) : QWidget(dialog)
+    {
+        setObjectName(QStringLiteral("hotaruModalFrame"));
+        setAttribute(Qt::WA_TransparentForMouseEvents);
+        lower();
+    }
+
+protected:
+    void paintEvent(QPaintEvent*) override
+    {
+        QPainter painter(this);
+        SettingsFrame::paint(painter, rect(), kModalRadius, kModalHeaderHeight + SettingsFrame::kBorder);
+    }
+};
+
+class ModalHeader final : public QFrame
+{
+public:
+    using QFrame::QFrame;
+
+protected:
+    void mousePressEvent(QMouseEvent* event) override
+    {
+        if (event->button() == Qt::LeftButton && window()->windowHandle()
+            && window()->windowHandle()->startSystemMove()) {
+            event->accept();
+            return;
+        }
+        QFrame::mousePressEvent(event);
+    }
+};
+
+ModalHeader* createModalHeader(QDialog* dialog)
+{
+    auto* header = new ModalHeader(dialog);
+    header->setObjectName(QStringLiteral("hotaruModalHeader"));
+    header->setFixedHeight(kModalHeaderHeight);
+    auto* row = new QHBoxLayout(header);
+    row->setContentsMargins(18, 8, 10, 8);
+    auto* title = new QLabel(dialog->windowTitle(), header);
+    title->setObjectName(QStringLiteral("hotaruModalTitle"));
+    title->setAttribute(Qt::WA_TransparentForMouseEvents);
+    row->addWidget(title, 1);
+    QObject::connect(dialog, &QDialog::windowTitleChanged, title, &QLabel::setText);
+    auto* close = new QToolButton(header);
+    close->setObjectName(QStringLiteral("hotaruModalClose"));
+    close->setAccessibleName(QStringLiteral("关闭"));
+    close->setToolTip(close->accessibleName());
+    close->setFocusPolicy(Qt::NoFocus);
+    close->setIconSize(QSize(16, 16));
+    close->setFixedSize(28, 28);
+    row->addWidget(close);
+    return header;
+}
+
+void enableModalFrame(QDialog* dialog)
+{
+    dialog->setProperty("hotaruModalDialog", true);
+    // 透明顶层交由 ModalFrame 绘制，弹窗样式表继续给 Qt 控件提供实体调色板。
+    dialog->setAttribute(Qt::WA_TranslucentBackground);
+    dialog->setWindowFlag(Qt::FramelessWindowHint);
+    new ModalFrame(dialog);
+    auto* style = new SettingsControlStyle(dialog);
+    style->setObjectName(QStringLiteral("hotaruModalControlStyle"));
+    style->setAnimationsEnabled(false);
+    if (qobject_cast<QMessageBox*>(dialog))
+        dialog->setStyle(style);
+}
+
+void bindStandardModal(QDialog* dialog)
+{
+    if (dialog->property("hotaruModalDialog").toBool())
+        return;
+    if (auto* message = qobject_cast<QMessageBox*>(dialog))
+        message->setOption(QMessageBox::Option::DontUseNativeDialog);
+    enableModalFrame(dialog);
+    // 保留 Qt 私有布局及其按钮、尺寸计算和关闭语义，标题栏占用独立内边距。
+    dialog->setProperty("hotaruStandardModal", true);
+    auto margins = dialog->contentsMargins();
+    margins.setTop(margins.top() + kModalHeaderHeight);
+    dialog->setContentsMargins(margins);
+    auto* header = createModalHeader(dialog);
+    auto* close = header->findChild<QToolButton*>(QStringLiteral("hotaruModalClose"));
+    QObject::connect(close, &QToolButton::clicked, dialog, &QDialog::close);
+}
+
+void clipNativeRoundedCorners(QWidget* widget, int radius)
+{
+    // SetWindowRgn 会同步发出窗口位置消息，避免重入 Qt 几何更新。
+    static thread_local bool applyingRegion = false;
+    if (applyingRegion || QGuiApplication::platformName() != QLatin1String("windows"))
+        return;
+    const auto hwnd = reinterpret_cast<HWND>(widget->internalWinId());
+    RECT bounds{};
+    if (!hwnd || !GetWindowRect(hwnd, &bounds))
+        return;
+    // 用原生设备像素限制窗口的绘制区域，给 Qt 绘制的抗锯齿边缘留一个像素。
+    const int diameter = qRound(2 * radius * widget->devicePixelRatioF());
+    const HRGN region = CreateRoundRectRgn(-1, -1, bounds.right - bounds.left + 1,
+                                          bounds.bottom - bounds.top + 1, diameter, diameter);
+    const QScopedValueRollback guard(applyingRegion, true);
+    if (region && !SetWindowRgn(hwnd, region, IsWindowVisible(hwnd)))
+        DeleteObject(region);
+}
+
+void updateDialogFrame(QWidget* dialog)
+{
+    const auto colors = SettingsPalette::current();
+    if (dialog->property("hotaruModalDialog").toBool()) {
+        if (auto* frame = dialog->findChild<QWidget*>(QStringLiteral("hotaruModalFrame"))) {
+            frame->setGeometry(dialog->rect());
+            frame->update();
+        }
+        if (auto* header = dialog->findChild<QFrame*>(QStringLiteral("hotaruModalHeader"))) {
+            if (dialog->property("hotaruStandardModal").toBool()) {
+                constexpr int edge = SettingsFrame::kBorder;
+                header->setGeometry(edge, edge, dialog->width() - 2 * edge, kModalHeaderHeight);
+                header->raise();
+            }
+            header->update();
+            if (auto* close = header->findChild<QToolButton*>(QStringLiteral("hotaruModalClose")))
+                close->setIcon(settingsIcon(SettingsGlyph::Close, QColor(colors.muted)));
+        }
+        clipNativeRoundedCorners(dialog, kModalRadius);
+        return;
+    }
+    if (QGuiApplication::platformName() != QLatin1String("windows")
+        || !dialog->testAttribute(Qt::WA_WState_Created))
+        return;
+    const HWND hwnd = reinterpret_cast<HWND>(dialog->winId());
+    const BOOL dark = current() == Mode::Dark;
+    const auto nativeColor = [](const char* value) {
+        const QColor color(value);
+        return RGB(color.red(), color.green(), color.blue());
+    };
+    const auto caption = nativeColor(colors.group);
+    const auto border = nativeColor(colors.line);
+    const auto text = nativeColor(colors.text);
+    DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &dark, sizeof(dark));
+    DwmSetWindowAttribute(hwnd, DWMWA_CAPTION_COLOR, &caption, sizeof(caption));
+    DwmSetWindowAttribute(hwnd, DWMWA_BORDER_COLOR, &border, sizeof(border));
+    DwmSetWindowAttribute(hwnd, DWMWA_TEXT_COLOR, &text, sizeof(text));
+}
 
 class DialogStyler : public QObject
 {
@@ -72,16 +260,47 @@ public:
 protected:
     bool eventFilter(QObject* watched, QEvent* event) override
     {
-        if ((event->type() == QEvent::Polish || event->type() == QEvent::ThemeChange)
-            && (qobject_cast<QMessageBox*>(watched) || qobject_cast<QInputDialog*>(watched)
-                || watched->property("hotaruBaseDialog").toBool()))
-        {
-            auto* dialog = static_cast<QWidget*>(watched);
+        const auto type = event->type();
+        const bool frameChanged = type == QEvent::Resize || type == QEvent::DevicePixelRatioChange;
+        if (type != QEvent::Polish && type != QEvent::ThemeChange && type != QEvent::Show && !frameChanged)
+            return false;
+        auto* dialog = qobject_cast<QDialog*>(watched);
+        if (!dialog)
+            return false;
+        const bool standard = qobject_cast<QMessageBox*>(dialog) || qobject_cast<QInputDialog*>(dialog);
+        if (!standard && !dialog->property("hotaruBaseDialog").toBool())
+            return false;
+        if (type == QEvent::Polish || type == QEvent::ThemeChange) {
             // 已安装的上游插件仍可能传入旧标题，显示时沿用宿主品牌。
             if (dialog->windowTitle().compare(QLatin1String("ltool"), Qt::CaseInsensitive) == 0)
                 dialog->setWindowTitle(QApplication::applicationDisplayName());
+            if (standard && type == QEvent::Polish)
+                bindStandardModal(dialog);
             bindDialog(dialog);
         }
+        if (type == QEvent::Show || type == QEvent::ThemeChange
+            || (frameChanged && dialog->property("hotaruModalDialog").toBool()))
+            updateDialogFrame(dialog);
+        return false;
+    }
+};
+
+class MenuFrame final : public QObject
+{
+public:
+    explicit MenuFrame(QMenu* menu) : QObject(menu)
+    {
+        menu->setAttribute(Qt::WA_TranslucentBackground);
+        menu->setWindowFlag(Qt::FramelessWindowHint);
+        menu->installEventFilter(this);
+    }
+
+protected:
+    bool eventFilter(QObject* watched, QEvent* event) override
+    {
+        const auto type = event->type();
+        if (type == QEvent::Show || type == QEvent::Resize || type == QEvent::DevicePixelRatioChange)
+            clipNativeRoundedCorners(static_cast<QMenu*>(watched), kMenuRadius);
         return false;
     }
 };
@@ -178,21 +397,28 @@ const char* valueOf(const Role& r)
 class Binder : public QObject
 {
 public:
-    explicit Binder(const char* qssWithTokens, bool launcher = false) : m_qss(qssWithTokens), m_launcher(launcher) {}
+    enum class Surface { Base, Launcher, Settings };
+    explicit Binder(const char* qssWithTokens, Surface surface = Surface::Base)
+        : m_qss(qssWithTokens), m_surface(surface) {}
 
 protected:
     bool eventFilter(QObject* watched, QEvent* e) override
     {
         if (e->type() == QEvent::ThemeChange) {
-            if (auto* w = qobject_cast<QWidget*>(watched))
-                w->setStyleSheet(m_launcher ? expandLauncher(QString::fromUtf8(m_qss)) : expand(m_qss.constData()));
+            if (auto* w = qobject_cast<QWidget*>(watched)) {
+                switch (m_surface) {
+                case Surface::Base: w->setStyleSheet(expand(m_qss.constData())); break;
+                case Surface::Launcher: w->setStyleSheet(expandLauncher(QString::fromUtf8(m_qss))); break;
+                case Surface::Settings: w->setStyleSheet(SettingsPalette::current().expand(m_qss.constData())); break;
+                }
+            }
         }
         return false;
     }
 
 private:
     QByteArray m_qss;
-    bool m_launcher;
+    Surface m_surface;
 };
 
 const Role* findRole(const QString& name)
@@ -583,29 +809,108 @@ void bind(QWidget* w, const char* qssWithTokens)
 
 void bindMenu(QWidget* menu)
 {
+    if (auto* popup = qobject_cast<QMenu*>(menu))
+        new MenuFrame(popup);
     bind(menu, kMenuQss);
+}
+
+void bindSettings(QWidget* widget, const char* qss)
+{
+    widget->setStyleSheet(SettingsPalette::current().expand(qss));
+    auto* binder = new Binder(qss, Binder::Surface::Settings);
+    binder->setParent(widget);
+    widget->installEventFilter(binder);
 }
 
 void bindDialog(QWidget* dialog)
 {
     dialog->setProperty("hotaruBaseDialog", true);
+    if (!dialog->property("hotaruModalDialog").isValid())
+        dialog->setProperty("hotaruModalDialog", false);
+    const auto colors = SettingsPalette::current();
+    if (auto* style = dialog->findChild<QStyle*>(QStringLiteral("hotaruModalControlStyle"))) {
+        static_cast<SettingsControlStyle*>(style)->applyTheme(colors);
+        for (auto* widget : dialog->findChildren<QWidget*>()) {
+            if (widget->window() == dialog && (qobject_cast<QPushButton*>(widget) || qobject_cast<QComboBox*>(widget)
+                || qobject_cast<QAbstractSpinBox*>(widget) || qobject_cast<QLineEdit*>(widget)))
+                widget->setStyle(style);
+        }
+    }
     QPalette pal = QApplication::palette();
     // 未激活的确认框也必须保持正文对比度，只有禁用控件使用弱化颜色。
     for (const auto group : {QPalette::Active, QPalette::Inactive}) {
-        pal.setColor(group, QPalette::WindowText, color("text"));
-        pal.setColor(group, QPalette::Text, color("text"));
-        pal.setColor(group, QPalette::ButtonText, color("text"));
+        pal.setColor(group, QPalette::Window, QColor(colors.window));
+        pal.setColor(group, QPalette::Base, QColor(colors.field));
+        pal.setColor(group, QPalette::Button, QColor(colors.field));
+        pal.setColor(group, QPalette::WindowText, QColor(colors.text));
+        pal.setColor(group, QPalette::Text, QColor(colors.text));
+        pal.setColor(group, QPalette::ButtonText, QColor(colors.text));
     }
     dialog->setPalette(pal);
-    dialog->setStyleSheet(expand(kDialogQss));
+    for (auto* box : dialog->findChildren<QDialogButtonBox*>()) {
+        for (auto* button : box->buttons()) {
+            const auto role = box->buttonRole(button);
+            button->setProperty("hotaruPrimary", role == QDialogButtonBox::AcceptRole
+                                  || role == QDialogButtonBox::YesRole);
+        }
+    }
+    if (auto* message = qobject_cast<QMessageBox*>(dialog)) {
+        for (auto* button : message->buttons()) {
+            const auto role = message->buttonRole(button);
+            button->setProperty("hotaruPrimary", role == QMessageBox::AcceptRole || role == QMessageBox::YesRole);
+            switch (message->standardButton(button)) {
+            case QMessageBox::Ok: button->setText(QStringLiteral("确定")); break;
+            case QMessageBox::Cancel: button->setText(QStringLiteral("取消")); break;
+            case QMessageBox::Yes: button->setText(QStringLiteral("是")); break;
+            case QMessageBox::No: button->setText(QStringLiteral("否")); break;
+            case QMessageBox::Close: button->setText(QStringLiteral("关闭")); break;
+            default: break;
+            }
+        }
+    }
+    dialog->setStyleSheet(colors.expand(kDialogQss));
+    if (auto* message = qobject_cast<QMessageBox*>(dialog); message && message->icon() != QMessageBox::NoIcon)
+        message->setIcon(message->icon());
+}
+
+void bindModal(QDialog* dialog, bool resizable)
+{
+    if (!dialog->layout() || dialog->property("hotaruModalDialog").toBool())
+        return;
+    enableModalFrame(dialog);
+    // 以调用者所在窗口为所有者，避免继承快捷搜索、配置等页面里的控件样式。
+    if (auto* parent = dialog->parentWidget(); parent && !parent->isWindow())
+        dialog->setParent(parent->window(), dialog->windowFlags());
+    auto* body = new QWidget;
+    body->setLayout(dialog->layout());
+    auto* root = new QVBoxLayout(dialog);
+    constexpr int edge = SettingsFrame::kBorder;
+    root->setContentsMargins(edge, edge, edge, edge);
+    root->setSpacing(0);
+    auto* header = createModalHeader(dialog);
+    auto* close = header->findChild<QToolButton*>(QStringLiteral("hotaruModalClose"));
+    QObject::connect(close, &QToolButton::clicked, dialog, &QDialog::reject);
+    root->addWidget(header);
+    root->addWidget(body, 1);
+    dialog->setSizeGripEnabled(resizable);
+    bindDialog(dialog);
+    updateDialogFrame(dialog);
 }
 
 void bindLauncher(QWidget* w, const char* qssWithTokens)
 {
     w->setStyleSheet(expandLauncher(QString::fromUtf8(qssWithTokens)));
-    auto* binder=new Binder(qssWithTokens,true);
+    auto* binder=new Binder(qssWithTokens, Binder::Surface::Launcher);
     binder->setParent(w);
     w->installEventFilter(binder);
+}
+
+void bindLauncherMenu(QWidget* menu)
+{
+    if (auto* popup = qobject_cast<QMenu*>(menu))
+        new MenuFrame(popup);
+    const auto qss = QByteArray(kMenuQss) + "QMenu::item:disabled { color: @muted; }";
+    bindLauncher(menu, qss.constData());
 }
 
 void applyToLauncher(QWidget* w)

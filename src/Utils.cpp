@@ -547,18 +547,13 @@ bool fileTargetMissing(const QString& raw)
 
 QIcon appIcon()
 {
-    QPixmap pm(64, 64);
-    pm.fill(Qt::transparent);
-    QPainter p(&pm);
-    p.setRenderHint(QPainter::Antialiasing);
-    QPainterPath path;
-    path.addRoundedRect(2, 2, 60, 60, 15, 15);
-    p.fillPath(path, QColor(63, 106, 224));
-    p.setPen(QPen(Qt::white, 6.4, Qt::SolidLine, Qt::SquareCap));
-    p.drawLine(QPointF(21.12, 17.28), QPointF(21.12, 46.72));
-    p.drawLine(QPointF(42.88, 17.28), QPointF(42.88, 46.72));
-    p.drawLine(QPointF(21.12, 32), QPointF(42.88, 32));
-    return QIcon(pm);
+    static const QIcon icon = [] {
+        QIcon result;
+        for (const int size : {16, 32, 64, 128})
+            result.addFile(QStringLiteral(":/hotaru/hotaru-icon-%1.png").arg(size), QSize(size, size));
+        return result;
+    }();
+    return icon;
 }
 
 void trayNote(const QString& title, const QString& msg, int msec)

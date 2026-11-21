@@ -5,3 +5,6 @@
 
 # 首版发布基线由 Bash 读取，避免 Windows 换行进入 Git 引用。
 tools/upstream-base.txt text eol=lf
+
+# Git 统一补丁用单个空格表示空白上下文行。
+cmake/qlementine-widget-scope.patch text eol=lf whitespace=-blank-at-eol

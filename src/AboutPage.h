@@ -29,6 +29,7 @@ public:
 
     // ---- 下面这些都是纯函数：不联网、不起进程，--about 逐条断言 ----
     static QString repositoryUrl();           // Hotaru 仓库，与上游插件源独立
+    static QString themePackagesPageUrl();    // 主题 ZIP 统一分发入口
     static QString currentVersion();          // 编译期那个 LTOOL_VERSION
     // Hotaru 发行资产直链；继承的上游插件商店地址单独维护。
     // tag 和版本号一一对上：CI 有一步专门验 "v" + ltool.iss 的 MyAppVersion == 标签。

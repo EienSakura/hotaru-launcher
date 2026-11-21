@@ -1,120 +1,103 @@
-#ifdef _WIN32
-#include <windows.h>
-#endif
-// 构建期图标生成器：产出 resources/ltool.ico（exe 与安装包共用这一份）
-//
-// 图标是画出来的，不是素材文件：圆角方块 + 左上→右下的蓝色渐变 + 白色 H。
-// 每个尺寸各自按矢量参数重画一遍（不是把 256 缩下去），小尺寸才不会糊。
-// ICO 里 7 条全用 PNG 载荷（Vista 之后 shell 就认这个，256 那条必须 PNG）。
+// 从同一张原图生成 Qt、Windows 和 README 所用的图标。
 #include <QBuffer>
-#include <QByteArray>
-#include <QColor>
-#include <QFile>
 #include <QCoreApplication>
+#include <QDataStream>
+#include <QDir>
 #include <QImage>
-#include <QLinearGradient>
+#include <QImageWriter>
 #include <QPainter>
-#include <QRectF>
-#include <QString>
+#include <QSaveFile>
 
+#include <array>
 #include <cstdio>
 
 namespace {
 
-const int kSizes[] = {16, 24, 32, 48, 64, 128, 256};
+constexpr std::array kIconSizes{16, 20, 24, 32, 40, 48, 64, 96, 128, 256};
+constexpr qreal kCornerRadiusRatio = 0.22;
 
-QImage draw(int size)
+QByteArray pngForSize(const QImage& source, int size)
 {
-    QImage img(size, size, QImage::Format_ARGB32_Premultiplied);
-    img.fill(Qt::transparent);
-    QPainter p(&img);
-    p.setRenderHint(QPainter::Antialiasing);
-
-    const qreal m = size / 32.0;                      // 四周留白
-    const QRectF box(m, m, size - 2 * m, size - 2 * m);
-    QLinearGradient g(box.topLeft(), box.bottomRight());
-    g.setColorAt(0.0, QColor(78, 138, 255));
-    g.setColorAt(1.0, QColor(47, 92, 215));
-    p.setPen(Qt::NoPen);
-    p.setBrush(g);
-    p.drawRoundedRect(box, size * 3.0 / 16.0, size * 3.0 / 16.0);
-
-    // 用几何笔画绘制H，避免构建机缺少字体时生成方框图标。
-    p.setPen(QPen(Qt::white, size * 0.10, Qt::SolidLine, Qt::SquareCap));
-    p.drawLine(QPointF(size * 0.33, size * 0.27), QPointF(size * 0.33, size * 0.73));
-    p.drawLine(QPointF(size * 0.67, size * 0.27), QPointF(size * 0.67, size * 0.73));
-    p.drawLine(QPointF(size * 0.33, size * 0.50), QPointF(size * 0.67, size * 0.50));
-    p.end();
-    return img;
+    const auto scaled = source.scaled(size, size, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+    // 每个尺寸单独裁出抗锯齿圆角，并保留源图的透明度。
+    QImage pixels(size, size, QImage::Format_ARGB32_Premultiplied);
+    pixels.fill(Qt::transparent);
+    QPainter painter(&pixels);
+    painter.setRenderHint(QPainter::Antialiasing);
+    painter.setPen(Qt::NoPen);
+    painter.setBrush(Qt::white);
+    const qreal radius = size * kCornerRadiusRatio;
+    painter.drawRoundedRect(QRectF(pixels.rect()), radius, radius);
+    painter.setCompositionMode(QPainter::CompositionMode_SourceIn);
+    painter.drawImage(0, 0, scaled);
+    painter.end();
+    QByteArray bytes;
+    QBuffer buffer(&bytes);
+    buffer.open(QIODevice::WriteOnly);
+    QImageWriter writer(&buffer, "png");
+    writer.setCompression(100);
+    return writer.write(pixels) ? bytes : QByteArray{};
 }
 
-QByteArray pngOf(int size)
+bool writeAsset(const QString& path, const QByteArray& bytes)
 {
-    QByteArray out;
-    QBuffer buf(&out);
-    buf.open(QIODevice::WriteOnly);
-    draw(size).save(&buf, "PNG");
-    buf.close();
-    return out;
-}
-
-void put16(QByteArray& a, quint16 v)
-{
-    a.append(reinterpret_cast<const char*>(&v), 2);
-}
-
-void put32(QByteArray& a, quint32 v)
-{
-    a.append(reinterpret_cast<const char*>(&v), 4);
+    QSaveFile file(path);
+    if (!file.open(QIODevice::WriteOnly) || file.write(bytes) != bytes.size() || !file.commit()) {
+        std::fprintf(stderr, "图标写入失败：%s\n", qPrintable(path));
+        return false;
+    }
+    std::printf("%s（%lld 字节）\n", qPrintable(path), static_cast<long long>(bytes.size()));
+    return true;
 }
 
 } // namespace
 
 int main(int argc, char** argv)
 {
-#ifdef _WIN32
-    SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX);
-#endif
-    QCoreApplication app(argc, argv);   // 纯位图几何绘制不需要平台插件或系统字体。
-    if (argc < 2) {
-        std::fprintf(stderr, "用法: genicon <输出 .ico 路径>\n");
+    QCoreApplication app(argc, argv);
+    const auto args = app.arguments();
+    if (args.size() != 3) {
+        std::fprintf(stderr, "用法：genicon <源 PNG> <项目目录>\n");
         return 2;
     }
-    const QString target = QString::fromLocal8Bit(argv[1]);
-    const int n = int(sizeof(kSizes) / sizeof(kSizes[0]));
 
-    QByteArray head;
-    put16(head, 0);                    // reserved
-    put16(head, 1);                    // 类型 1 = 图标
-    put16(head, quint16(n));
-
-    QByteArray dir, images;
-    quint32 offset = quint32(6 + 16 * n);
-    for (int i = 0; i < n; ++i) {
-        const int size = kSizes[i];
-        const QByteArray png = pngOf(size);
-        QByteArray e;
-        e.append(char(size < 256 ? size : 0));   // 宽高：256 记 0
-        e.append(char(size < 256 ? size : 0));
-        e.append(char(0));                        // 颜色数：24 位以上留 0
-        e.append(char(0));                        // 保留
-        put16(e, 1);                              // 平面数
-        put16(e, 32);                             // 位深
-        put32(e, quint32(png.size()));
-        put32(e, offset);
-        dir += e;
-        images += png;
-        offset += quint32(png.size());
-    }
-
-    QFile f(target);
-    if (!f.open(QIODevice::WriteOnly)) {
-        std::fprintf(stderr, "genicon: 写不了 %s\n", qPrintable(target));
+    const QImage source(args[1], "PNG");
+    if (source.isNull() || source.width() != source.height()) {
+        std::fprintf(stderr, "应用图标原图必须是有效的方形 PNG。\n");
         return 1;
     }
-    f.write(head + dir + images);
-    f.close();
-    std::printf("genicon: %s（%d 个尺寸，%lld 字节）\n", qPrintable(target), n,
-                qint64(head.size() + dir.size() + images.size()));
-    return 0;
+    const QDir root(args[2]);
+    if (!root.mkpath(QStringLiteral("resources/branding")) || !root.mkpath(QStringLiteral("docs/images"))) {
+        std::fprintf(stderr, "无法创建图标输出目录。\n");
+        return 1;
+    }
+
+    // Windows ICONDIR 固定为小端，256 像素的目录宽高以零表示。
+    QByteArray ico;
+    QDataStream directory(&ico, QIODevice::WriteOnly);
+    directory.setByteOrder(QDataStream::LittleEndian);
+    directory << quint16(0) << quint16(1) << quint16(kIconSizes.size());
+    quint32 offset = 6 + 16 * kIconSizes.size();
+    QByteArray images;
+    for (const int size : kIconSizes) {
+        const auto png = pngForSize(source, size);
+        if (png.isEmpty()) {
+            std::fprintf(stderr, "无法编码 %d 像素的 PNG。\n", size);
+            return 1;
+        }
+        const auto dimension = quint8(size == 256 ? 0 : size);
+        directory << dimension << dimension << quint8(0) << quint8(0)
+                  << quint16(1) << quint16(32) << quint32(png.size()) << offset;
+        offset += quint32(png.size());
+        images += png;
+
+        if (size == 16 || size == 32 || size == 64 || size == 128) {
+            const auto path = root.filePath(QStringLiteral("resources/branding/hotaru-icon-%1.png").arg(size));
+            if (!writeAsset(path, png))
+                return 1;
+        }
+        if (size == 256 && !writeAsset(root.filePath(QStringLiteral("docs/images/hotaru-icon-256.png")), png))
+            return 1;
+    }
+    return writeAsset(root.filePath(QStringLiteral("resources/ltool.ico")), ico + images) ? 0 : 1;
 }

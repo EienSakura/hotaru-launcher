@@ -15,6 +15,9 @@ public:
     void editEntryAt(int index);
     void removeEntryAt(int index);
 
+protected:
+    void changeEvent(QEvent* event) override;
+
 private:
     void rebuild();
     void addEntry();

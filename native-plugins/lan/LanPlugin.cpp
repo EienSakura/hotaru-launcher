@@ -65,11 +65,14 @@ QVBoxLayout* cardLayout(QFrame* card, const QString& title)
 
 void addCardPair(QVBoxLayout* page, QFrame* left, QFrame* right)
 {
-    auto* row = new QHBoxLayout;
+    auto* cardPair = new QWidget(page->parentWidget());
+    cardPair->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Maximum);
+    auto* row = new QHBoxLayout(cardPair);
+    row->setContentsMargins(0, 0, 0, 0);
     row->setSpacing(12);
     row->addWidget(left, 1);
     row->addWidget(right, 1);
-    page->addLayout(row);
+    page->addWidget(cardPair);
 }
 
 class DropPanel final : public QFrame {
@@ -115,17 +118,31 @@ QWidget* pageFor(Service& service, int feature, QWidget* parent, const QByteArra
     if (stack)
         stack->addWidget(scroll);
     auto* page = new QWidget(scroll);
+    page->setObjectName(QStringLiteral("lanDetailBody"));
     auto* layout = new QVBoxLayout(page);
-    layout->setContentsMargins(22, 12, 22, 20);
+    layout->setContentsMargins(30, 12, 30, 20);
     layout->setSpacing(12);
-    layout->addWidget(titleLabel(core ? QStringLiteral("局域网连接") : files ?
-        QStringLiteral("局域网文件分享") : QStringLiteral("局域网剪贴板共享"), page));
+    auto* heading = titleLabel(core ? QStringLiteral("局域网连接") : files ?
+        QStringLiteral("局域网文件分享") : QStringLiteral("局域网剪贴板共享"), page);
+    heading->setObjectName(QStringLiteral("lanDetailTitle"));
+    layout->addWidget(heading);
+    auto* connection = new QFrame(page);
+    auto* connectionLayout = cardLayout(connection, core ? QStringLiteral("设备与连接") : QStringLiteral("功能状态"));
+    layout->addWidget(connection);
     auto* enable = new QCheckBox(core ? QStringLiteral("启用局域网连接") : QStringLiteral("启用此插件"), page);
     auto* status = textLabel({}, page);
+    status->setObjectName(QStringLiteral("muted"));
     auto* feedback = textLabel({}, page);
-    layout->addWidget(enable);
-    layout->addWidget(status);
-    const auto showError = [feedback](QString error) { feedback->setText(error); };
+    feedback->hide();
+    auto* connectionRow = new QHBoxLayout;
+    connectionRow->setSpacing(14);
+    connectionRow->addWidget(enable);
+    connectionRow->addWidget(status, 1);
+    connectionLayout->addLayout(connectionRow);
+    const auto showError = [feedback](const QString& error) {
+        feedback->setText(error);
+        feedback->setVisible(!error.isEmpty());
+    };
     const auto refreshEnable = [=, &service] {
         const QSignalBlocker block(enable);
         enable->setChecked(core ? service.coreEnabled() : service.requested(feature));
@@ -163,9 +180,15 @@ QWidget* pageFor(Service& service, int feature, QWidget* parent, const QByteArra
         auto* name = new QLineEdit(service.name(), page);
         name->setMaxLength(48);
         auto* save = new QPushButton(QStringLiteral("保存设备名"), page);
-        form->addRow(QStringLiteral("此电脑的名称"), name);
-        form->addRow(save);
-        layout->addLayout(form);
+        auto* nameRow = new QHBoxLayout;
+        nameRow->setSpacing(8);
+        nameRow->addWidget(name, 1);
+        nameRow->addWidget(save);
+        form->setHorizontalSpacing(12);
+        form->addRow(QStringLiteral("此电脑的名称"), nameRow);
+        if (auto* label = qobject_cast<QLabel*>(form->labelForField(nameRow)))
+            label->setBuddy(name);
+        connectionLayout->addLayout(form);
         QObject::connect(save, &QPushButton::clicked, page, [=, &service] {
             QString error;
             if (service.configure(name->text(), error))
@@ -173,31 +196,46 @@ QWidget* pageFor(Service& service, int feature, QWidget* parent, const QByteArra
             showError(error);
         });
 
-        layout->addWidget(titleLabel(QStringLiteral("配对新设备"), page));
-        layout->addWidget(textLabel(QStringLiteral("生成邀请码后，同一专用网络的 Hotaru 可看到此电脑的名称和地址。"), page));
+        auto* invitationCard = new QFrame(page);
+        auto* invite = cardLayout(invitationCard, QStringLiteral("配对新设备"));
+        auto* deviceCard = new QFrame(page);
+        auto* deviceLayout = cardLayout(deviceCard, QStringLiteral("已配对设备"));
+        addCardPair(layout, invitationCard, deviceCard);
+        invite->addWidget(textLabel(QStringLiteral("生成邀请码后，同一专用网络的 Hotaru 可看到此电脑的名称和地址。"), invitationCard));
         auto* create = new QPushButton(QStringLiteral("生成邀请码"), page);
         auto* cancel = new QPushButton(QStringLiteral("取消邀请"), page);
         auto* codeText = textLabel({}, page);
         auto* inviteRow = new QHBoxLayout;
+        inviteRow->setSpacing(8);
         inviteRow->addWidget(create);
-        inviteRow->addWidget(cancel);
-        inviteRow->addWidget(codeText, 1);
-        layout->addLayout(inviteRow);
         auto* discover = new QPushButton(QStringLiteral("发现邀请 ›"), page);
-        layout->addWidget(discover, 0, Qt::AlignLeft);
+        inviteRow->addWidget(discover);
+        inviteRow->addStretch();
+        invite->addLayout(inviteRow);
+        auto* activeInvite = new QHBoxLayout;
+        activeInvite->setSpacing(8);
+        activeInvite->addWidget(codeText, 1);
+        activeInvite->addWidget(cancel, 0, Qt::AlignTop);
+        invite->addLayout(activeInvite);
         auto* invitationScroll = new QScrollArea(stack);
         invitationScroll->setWidgetResizable(true);
         invitationScroll->setFrameShape(QFrame::NoFrame);
         auto* invitationPage = new QWidget(invitationScroll);
+        invitationPage->setObjectName(QStringLiteral("lanDetailBody"));
         invitationScroll->setWidget(invitationPage);
         auto* invitationLayout = new QVBoxLayout(invitationPage);
-        invitationLayout->setContentsMargins(22, 12, 22, 20);
+        invitationLayout->setContentsMargins(30, 12, 30, 20);
         invitationLayout->setSpacing(12);
         stack->addWidget(invitationScroll);
         auto* back = new QPushButton(QStringLiteral("返回局域网连接"), invitationPage);
         invitationLayout->addWidget(back, 0, Qt::AlignLeft);
-        invitationLayout->addWidget(titleLabel(QStringLiteral("发现邀请"), invitationPage));
-        invitationLayout->addWidget(textLabel(QStringLiteral("请选择正在邀请的电脑，或手动填写 IPv4。设备名称仅供辨认，请与对方核对。"), invitationPage));
+        auto* invitationHeading = titleLabel(QStringLiteral("发现邀请"), invitationPage);
+        invitationHeading->setObjectName(QStringLiteral("lanDetailTitle"));
+        invitationLayout->addWidget(invitationHeading);
+        auto* joinCard = new QFrame(invitationPage);
+        auto* joinLayout = cardLayout(joinCard, QStringLiteral("配对信息"));
+        invitationLayout->addWidget(joinCard);
+        joinLayout->addWidget(textLabel(QStringLiteral("请选择正在邀请的电脑，或手动填写 IPv4。设备名称仅供辨认，请与对方核对。"), joinCard));
         auto* candidates = new QComboBox(invitationPage);
         candidates->setAccessibleName(QStringLiteral("正在邀请的设备"));
         auto* address = new QLineEdit(invitationPage);
@@ -207,12 +245,14 @@ QWidget* pageFor(Service& service, int feature, QWidget* parent, const QByteArra
         code->setPlaceholderText(QStringLiteral("五位邀请码"));
         code->setAccessibleName(QStringLiteral("五位邀请码"));
         auto* join = new QPushButton(QStringLiteral("发起配对"), invitationPage);
+        join->setProperty("settingsPrimary", true);
         auto* joinForm = new QFormLayout;
+        joinForm->setSpacing(8);
         joinForm->addRow(QStringLiteral("发现的邀请"), candidates);
         joinForm->addRow(QStringLiteral("手动填写地址"), address);
         joinForm->addRow(QStringLiteral("邀请码"), code);
-        joinForm->addRow(join);
-        invitationLayout->addLayout(joinForm);
+        joinLayout->addLayout(joinForm);
+        joinLayout->addWidget(join, 0, Qt::AlignRight);
         auto* joinStatus = textLabel({}, invitationPage);
         auto* joinError = textLabel({}, invitationPage);
         invitationLayout->addWidget(joinStatus);
@@ -227,26 +267,32 @@ QWidget* pageFor(Service& service, int feature, QWidget* parent, const QByteArra
             discover->setFocus();
         });
         auto* request = textLabel({}, page);
-        layout->addWidget(request);
+        invite->addWidget(request);
         auto* confirm = new QPushButton(QStringLiteral("确认配对"), page);
         auto* reject = new QPushButton(QStringLiteral("拒绝"), page);
         auto* requestRow = new QHBoxLayout;
+        requestRow->setSpacing(8);
         requestRow->addWidget(confirm);
         requestRow->addWidget(reject);
         requestRow->addStretch();
-        layout->addLayout(requestRow);
+        invite->addLayout(requestRow);
         auto* pairing = textLabel({}, page);
-        layout->addWidget(pairing);
+        invite->addWidget(pairing);
+        invite->addStretch();
 
-        layout->addWidget(titleLabel(QStringLiteral("已配对设备"), page));
         auto* devices = new QListWidget(page);
         devices->setAccessibleName(QStringLiteral("已配对设备"));
+        devices->setObjectName(QStringLiteral("lanPairedDevices"));
         devices->setMaximumHeight(136);
-        layout->addWidget(devices);
+        deviceLayout->addWidget(devices);
+        auto* emptyDevices = textLabel(QStringLiteral("暂无已配对设备"), deviceCard);
+        emptyDevices->setObjectName(QStringLiteral("muted"));
+        deviceLayout->addWidget(emptyDevices);
         auto* forget = new QPushButton(QStringLiteral("撤销所选设备"), page);
-        layout->addWidget(forget, 0, Qt::AlignLeft);
+        deviceLayout->addWidget(forget, 0, Qt::AlignLeft);
+        deviceLayout->addStretch();
 
-        auto* diagnostics = new QPushButton(QStringLiteral("连接诊断 ▸"), page);
+        auto* diagnostics = new QPushButton(QStringLiteral("连接诊断 +"), page);
         diagnostics->setCheckable(true);
         layout->addWidget(diagnostics, 0, Qt::AlignLeft);
         auto* diagnosticPanel = new QWidget(page);
@@ -258,13 +304,14 @@ QWidget* pageFor(Service& service, int feature, QWidget* parent, const QByteArra
         probeAddress->setPlaceholderText(QStringLiteral("手动探测 IPv4"));
         auto* probe = new QPushButton(QStringLiteral("探测"), diagnosticPanel);
         auto* probeRow = new QHBoxLayout;
+        probeRow->setSpacing(8);
         probeRow->addWidget(probeAddress);
         probeRow->addWidget(probe);
         details->addLayout(probeRow);
         auto* logs = new QPushButton(QStringLiteral("打开诊断日志目录"), diagnosticPanel);
         details->addWidget(logs, 0, Qt::AlignLeft);
         QObject::connect(diagnostics, &QPushButton::toggled, diagnostics, [diagnostics](bool open) {
-            diagnostics->setText(open ? QStringLiteral("连接诊断 ▾") : QStringLiteral("连接诊断 ▸"));
+            diagnostics->setText(open ? QStringLiteral("连接诊断 −") : QStringLiteral("连接诊断 +"));
         });
         diagnosticPanel->hide();
         layout->addWidget(diagnosticPanel);
@@ -317,14 +364,18 @@ QWidget* pageFor(Service& service, int feature, QWidget* parent, const QByteArra
             cancel->setVisible(service.invitationInProgress());
             codeText->setText(invitation.isEmpty() ? QString{} : QStringLiteral("%1 · 两分钟内有效\n%2 · %3")
                 .arg(QString::fromLatin1(invitation), service.name(), service.invitationAddresses().join(QStringLiteral("、"))));
+            codeText->setVisible(!invitation.isEmpty());
             address->setEnabled(service.coreEnabled());
             code->setEnabled(service.coreEnabled());
             join->setEnabled(service.coreEnabled());
             request->setText(pending.isEmpty() ? QString{} : QStringLiteral("「%1」请求配对，请核对设备名称。").arg(pending));
+            request->setVisible(!pending.isEmpty());
             confirm->setVisible(!pending.isEmpty());
             reject->setVisible(!pending.isEmpty());
-            pairing->setText(service.pairingStatus());
-            joinStatus->setText(service.pairingStatus());
+            const auto pairingStatus = service.pairingStatus();
+            pairing->setText(pairingStatus);
+            pairing->setVisible(!pairingStatus.isEmpty());
+            joinStatus->setText(pairingStatus);
             const auto current = devices->currentItem() ? devices->currentItem()->data(Qt::UserRole) : QVariant{};
             const auto peers = service.pairedDevices();
             bool same = devices->count() == peers.size();
@@ -335,6 +386,8 @@ QWidget* pageFor(Service& service, int feature, QWidget* parent, const QByteArra
                 same = devices->item(i)->data(Qt::UserRole).toByteArray() == device.id &&
                        devices->item(i)->text() == title;
             }
+            devices->setVisible(!peers.isEmpty());
+            emptyDevices->setVisible(peers.isEmpty());
             if (!same) {
                 devices->clear();
                 for (const auto& device : peers) {

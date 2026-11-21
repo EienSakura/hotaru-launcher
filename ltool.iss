@@ -3,7 +3,7 @@
 ; 产物: installer\Hotaru-{#MyAppVersion}-setup.exe（按用户安装到 %LOCALAPPDATA%\Programs\Hotaru，无需管理员）
 
 #define MyAppName "Hotaru"
-#define MyAppVersion "1.0.2"
+#define MyAppVersion "1.1.0"
 #define MyAppPublisher "Hotaru"
 #define MyAppExeName "Hotaru.exe"
 
@@ -76,12 +76,12 @@ Source: "build\Release\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
 ; 都别跟着 * 一起进包
 ; qjp2/qwebp/qtiff 是死插件：它们硬导入 jasper.dll / libwebp*.dll / tiff.dll，而这些
 ; 依赖在 vcpkg 树里根本没装，插件永远加载不了，干净系统上还会弹"缺少 xxx.dll"
-; D3Dcompiler_47/dxcompiler/dxil/Qt6Svg/qsvg/qsvgicon/qtuiotouchplugin 见 CMakeLists 里
+; D3Dcompiler_47/dxcompiler/dxil/qtuiotouchplugin 见 CMakeLists 里
 ; windeployqt 的 --no-system-d*-compiler / --exclude-plugins，这里是挡历史遗留副本的第二道
 ; captures / recordings：截图/录像的默认落点就是 exe 旁边这两个文件夹，本机自测要是
 ; 手滑在 build\Release 里跑过一次 F1，别让那几张图跟着安装包出去
 Source: "build\Release\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs; \
-    Excludes: "=,*.exe,*.lib,*.exp,captures,recordings,data,D3Dcompiler_47.dll,dxcompiler.dll,dxil.dll,Qt6Svg.dll,qsvg.dll,qsvgicon.dll,qtuiotouchplugin.dll,qjp2.dll,qwebp.dll,qtiff.dll,qoffscreen.dll,ltool-plugins,ltool-plugins\*"
+    Excludes: "=,*.exe,*.lib,*.exp,captures,recordings,data,D3Dcompiler_47.dll,dxcompiler.dll,dxil.dll,qtuiotouchplugin.dll,qjp2.dll,qwebp.dll,qtiff.dll,qoffscreen.dll,ltool-plugins,ltool-plugins\*"
 
 ; 默认安装器不含插件；只有显式传入 -DBUNDLE_PLUGINS 才收集额外构建的 DLL。
 #ifdef BUNDLE_PLUGINS
@@ -99,9 +99,6 @@ Source: "build\Release\ltool-plugins\*.dll"; DestDir: "{app}\ltool-plugins"; Fla
 Type: files; Name: "{app}\D3Dcompiler_47.dll"
 Type: files; Name: "{app}\dxcompiler.dll"
 Type: files; Name: "{app}\dxil.dll"
-Type: files; Name: "{app}\Qt6Svg.dll"
-Type: files; Name: "{app}\imageformats\qsvg.dll"
-Type: files; Name: "{app}\iconengines\qsvgicon.dll"
 Type: files; Name: "{app}\generic\qtuiotouchplugin.dll"
 Type: files; Name: "{app}\genicon.exe"
 Type: files; Name: "{app}\="

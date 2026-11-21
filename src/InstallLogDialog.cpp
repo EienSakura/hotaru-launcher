@@ -18,15 +18,19 @@ InstallLogDialog::InstallLogDialog(QWidget* parent, const QString& title,
     : QDialog(parent)
 {
     setWindowTitle("安装 " + title);
+    setObjectName(QStringLiteral("foregroundInstallLogDialog"));
     resize(660, 400);
 
     auto* lay = new QVBoxLayout(this);
+    lay->setContentsMargins(18, 16, 18, 16);
+    lay->setSpacing(10);
     lay->addWidget(new QLabel(QString("正在安装 %1（过程如下，完成后可直接关闭）").arg(title), this));
     auto* cmd = new QLabel("$ " + displayCommand, this);
     cmd->setWordWrap(true);
     Theme::bind(cmd, "color:@muted;");
     lay->addWidget(cmd);
     auto* log = new QPlainTextEdit(this);
+    log->setObjectName(QStringLiteral("installLogOutput"));
     log->setReadOnly(true);
     lay->addWidget(log, 1);
     auto* closeBtn = new QPushButton("关闭", this);
@@ -54,6 +58,7 @@ InstallLogDialog::InstallLogDialog(QWidget* parent, const QString& title,
             QString::number(code), QString::number(quint32(code), 16)));
         closeBtn->setText("完成");
     });
+    Theme::bindModal(this, true);
     proc->setProcessChannelMode(QProcess::MergedChannels);
     proc->start(program, args);   // 直接起进程：过 cmd.exe 会剥掉 --location 的引号
 }

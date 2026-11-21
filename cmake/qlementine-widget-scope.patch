@@ -1,0 +1,110 @@
+diff --git a/lib/CMakeLists.txt b/lib/CMakeLists.txt
+index 95ba502..7df543f 100644
+--- a/lib/CMakeLists.txt
++++ b/lib/CMakeLists.txt
+@@ -116,8 +116,6 @@ set(HEADERS
+ 
+ set(RESOURCES
+   resources/qlementine.qrc
+-  resources/qlementine_font_inter.qrc
+-  resources/qlementine_font_roboto.qrc
+ )
+ 
+ option(BUILD_SHARED_LIBS "Build shared libraries instead of static" OFF)
+diff --git a/lib/include/oclero/qlementine/style/Theme.hpp b/lib/include/oclero/qlementine/style/Theme.hpp
+index dd319fc..c2a7491 100644
+--- a/lib/include/oclero/qlementine/style/Theme.hpp
++++ b/lib/include/oclero/qlementine/style/Theme.hpp
+@@ -145,7 +145,7 @@ public: // Values.
+   QColor semiTransparentColor4{ QRgba64::fromArgb32(0x28000000) };
+   QColor semiTransparentColorTransparent{ QRgba64::fromArgb32(0x00000000) };
+ 
+-  bool useSystemFonts{ false };
++  bool useSystemFonts{ true };
+ 
+   int fontSize{ 12 };
+   int fontSizeMonospace{ 13 };
+diff --git a/lib/src/resources/ResourceInitialization.cpp b/lib/src/resources/ResourceInitialization.cpp
+index e5edc67..d743cda 100644
+--- a/lib/src/resources/ResourceInitialization.cpp
++++ b/lib/src/resources/ResourceInitialization.cpp
+@@ -9,8 +9,6 @@
+ void qlementineResourceInitialization() {
+   // Loads the QRC content.
+   Q_INIT_RESOURCE(qlementine);
+-  Q_INIT_RESOURCE(qlementine_font_inter);
+-  Q_INIT_RESOURCE(qlementine_font_roboto);
+ }
+ 
+ namespace oclero::qlementine::resources {
+diff --git a/lib/src/style/QlementineStyle.cpp b/lib/src/style/QlementineStyle.cpp
+index 153308f..b376073 100644
+--- a/lib/src/style/QlementineStyle.cpp
++++ b/lib/src/style/QlementineStyle.cpp
+@@ -115,28 +115,6 @@ struct QlementineStyleImpl {
+   explicit QlementineStyleImpl(QlementineStyle& o)
+     : owner(o) {
+     std::call_once(qlementineOnceFlag, qlementine::resources::initializeResources);
+-    installFonts();
+-  }
+-
+-  /// Registers all the theme fonts to Qt's font database.
+-  void installFonts() {
+-    const auto regularFontPath = QString(":/qlementine/resources/fonts/inter/%1.ttf");
+-    QFontDatabase::addApplicationFont(regularFontPath.arg(QStringLiteral("Inter-Regular")));
+-    QFontDatabase::addApplicationFont(regularFontPath.arg(QStringLiteral("Inter-Italic")));
+-    QFontDatabase::addApplicationFont(regularFontPath.arg(QStringLiteral("Inter-Bold")));
+-    QFontDatabase::addApplicationFont(regularFontPath.arg(QStringLiteral("Inter-BoldItalic")));
+-
+-    const auto fixedFontPath = QString(":/qlementine/resources/fonts/roboto-mono/%1.ttf");
+-    QFontDatabase::addApplicationFont(fixedFontPath.arg(QStringLiteral("RobotoMono-Regular")));
+-    QFontDatabase::addApplicationFont(fixedFontPath.arg(QStringLiteral("RobotoMono-Italic")));
+-    QFontDatabase::addApplicationFont(fixedFontPath.arg(QStringLiteral("RobotoMono-Bold")));
+-    QFontDatabase::addApplicationFont(fixedFontPath.arg(QStringLiteral("RobotoMono-BoldItalic")));
+-
+-    const auto titleFontPath = QString(":/qlementine/resources/fonts/inter/%1.ttf");
+-    QFontDatabase::addApplicationFont(titleFontPath.arg(QStringLiteral("InterDisplay-Regular")));
+-    QFontDatabase::addApplicationFont(titleFontPath.arg(QStringLiteral("InterDisplay-Italic")));
+-    QFontDatabase::addApplicationFont(titleFontPath.arg(QStringLiteral("InterDisplay-Bold")));
+-    QFontDatabase::addApplicationFont(titleFontPath.arg(QStringLiteral("InterDisplay-BoldItalic")));
+   }
+ 
+   /// Some widgets need to have a QPalette explicitely set.
+@@ -298,8 +276,9 @@ struct QlementineStyleImpl {
+ 
+ QlementineStyle::QlementineStyle(QObject* parent)
+   : _impl(new QlementineStyleImpl{ *this }) {
+-  _impl->updatePalette();
+   setParent(parent);
++  if (!qobject_cast<QWidget*>(parent))
++    _impl->updatePalette();
+   setObjectName(QStringLiteral("QlementineStyle"));
+ 
+   // This method is virtual so it should not be called in the base class constructor.
+@@ -344,17 +323,20 @@ void QlementineStyle::setAnimationsEnabled(bool enabled) {
+ 
+ void QlementineStyle::triggerCompleteRepaint() {
+   _impl->updateFonts();
+-  _impl->updatePalette();
+ 
+   // Clear generated icons because they depend on colors.
+   _impl->standardIconCache.clear();
+-  QPixmapCache::clear();
+ 
+-  // Update the palette.
+-  const auto palette = standardPalette();
+-  QApplication::setPalette(palette);
++  if (auto* root = qobject_cast<QWidget*>(parent())) {
++    root->update();
++    for (auto* child : root->findChildren<QWidget*>())
++      child->update();
++    return;
++  }
+ 
+-  // Update the application font.
++  _impl->updatePalette();
++  QPixmapCache::clear();
++  QApplication::setPalette(standardPalette());
+   QApplication::setFont(_impl->theme.fontRegular);
+ 
+   // Repaint all top-level widgets.

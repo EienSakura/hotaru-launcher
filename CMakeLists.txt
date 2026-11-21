@@ -35,30 +35,28 @@ endif()
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_AUTOMOC ON)
-set(CMAKE_AUTORCC OFF)   # 本项目没有 .qrc（图标走 resources/ltool.rc）
+set(CMAKE_AUTORCC OFF)   # Qt 资源显式嵌入，Windows 程序图标由资源脚本编译。
 
-find_package(Qt6 REQUIRED COMPONENTS Widgets Concurrent Network)
+find_package(Qt6 REQUIRED COMPONENTS Widgets Concurrent Network Svg)
+
+# 固定上游 1.5.2，静态链接到宿主，设置页无需额外部署样式插件。
+include(FetchContent)
+find_package(Git REQUIRED)
+FetchContent_Declare(qlementine
+    URL https://codeload.github.com/oclero/qlementine/tar.gz/7825161fce66ac5a49bc0ffe39ab13df5ff8ff4a
+    URL_HASH SHA256=14b42fd77792eba7cc5095942cdd271b8f2b2480017d4d78ee4e0dc59a621a49
+    DOWNLOAD_EXTRACT_TIMESTAMP FALSE
+    PATCH_COMMAND "${GIT_EXECUTABLE}" --work-tree=. apply --ignore-whitespace
+                  "${CMAKE_CURRENT_SOURCE_DIR}/cmake/qlementine-widget-scope.patch"
+)
+FetchContent_MakeAvailable(qlementine)
+set_property(DIRECTORY "${qlementine_SOURCE_DIR}" PROPERTY EXCLUDE_FROM_ALL TRUE)
 
 qt_standard_project_setup()
 
-# 图标生成工具（构建期产出 resources/ltool.ico，嵌入 exe 与安装包）
-add_executable(genicon tools/genicon.cpp)
+# 日常构建使用仓库内的图标资源。更换原图后可单独构建并运行 genicon。
+add_executable(genicon EXCLUDE_FROM_ALL tools/genicon.cpp)
 target_link_libraries(genicon PRIVATE Qt6::Gui)
-set(ICON_FILE ${CMAKE_CURRENT_SOURCE_DIR}/resources/ltool.ico)
-if(NOT EXISTS "${ICON_FILE}")
-    add_custom_command(
-        OUTPUT ${ICON_FILE}
-        COMMAND $<TARGET_FILE:genicon> ${ICON_FILE}
-        DEPENDS genicon
-        COMMENT "genicon: 生成 ltool.ico"
-        VERBATIM
-    )
-    add_custom_target(appicon DEPENDS ${ICON_FILE})
-else()
-    add_custom_target(appicon
-        COMMENT "ltool.ico 已在位，跳过重复生成"
-    )
-endif()
 
 # ============================================================================
 # ltoolcore.dll —— 主程序和 DLL 插件共用的一份实现
@@ -197,6 +195,15 @@ qt_add_library(ltoolcore SHARED
     src/LauncherSkin.cpp
     src/SearchWindow.cpp
 )
+qt_add_resources(ltoolcore hotaru_brand
+    PREFIX "/hotaru"
+    BASE "resources/branding"
+    FILES
+        resources/branding/hotaru-icon-16.png
+        resources/branding/hotaru-icon-32.png
+        resources/branding/hotaru-icon-64.png
+        resources/branding/hotaru-icon-128.png
+)
 set_target_properties(ltoolcore PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS ON
     # 导入库（1.7MB）挪出 Release 树：安装包按 build\Release\* 递归收走，躺在里面的
     # ltoolcore.lib/.exp 不是运行时文件，纯属被误打包
@@ -306,7 +313,7 @@ endfunction()
 
 ltool_target_setup(ltoolcore)
 find_package(OpenSSL REQUIRED COMPONENTS Crypto)
-target_link_libraries(ltoolcore PRIVATE OpenSSL::Crypto)
+target_link_libraries(ltoolcore PRIVATE OpenSSL::Crypto qlementine)
 # 官方构建默认信任 Hotaru-Plugins 当前发布公钥；派生构建可覆盖。
 set(HOTARU_PLUGIN_PUBLIC_KEYS "10c5c77ea4aae86fcba5a68e3d188cdf64b93f85c4ca5f83235f1771989a75b2"
     CACHE STRING "官方 Ed25519 公钥，逗号分隔的 32 字节十六进制")
@@ -350,10 +357,11 @@ if(MSVC)
     endif()
 endif()
 
-# ---- 主程序：现在只剩 main.cpp（热键、托盘、单实例、命令行自测入口）----
+# ---- 主程序与独立自测 ----
 qt_add_executable(ltool WIN32
     src/main.cpp
     src/HotaruSelftest.cpp
+    src/HotaruSettingsSelftest.cpp
     src/HotaruStartupSelftest.cpp
     resources/ltool.rc
 )
@@ -367,7 +375,6 @@ target_compile_definitions(ltool PRIVATE
     HOTARU_VERSION_MAJOR=${PROJECT_VERSION_MAJOR}
     HOTARU_VERSION_MINOR=${PROJECT_VERSION_MINOR}
     HOTARU_VERSION_PATCH=${PROJECT_VERSION_PATCH})
-add_dependencies(ltool appicon)
 target_link_libraries(ltool PRIVATE ltoolcore)
 ltool_target_setup(ltool)
 
@@ -483,7 +490,7 @@ find_program(QT_WINDEPLOYQT_EXE windeployqt
 if(QT_WINDEPLOYQT_EXE)
     # --no-system-d*-compiler：D3Dcompiler_47 / dxcompiler / dxil 一共约 20MB，只有
     #   ANGLE/Qt Quick 编译着色器时才用得到，本项目是 Widgets + 光栅绘制，没人导入它们
-    # --exclude-plugins：svg 图标插件（Qt6Svg+qsvg+qsvgicon）和 IoT 触摸插件用不到
+    # Qlementine 使用 Qt SVG 图标，仍排除未用的 IoT 触摸插件。
     add_custom_command(TARGET ltool POST_BUILD
         COMMAND "${QT_WINDEPLOYQT_EXE}"
                 "$<IF:$<CONFIG:Debug>,--debug,--release>"
@@ -491,7 +498,8 @@ if(QT_WINDEPLOYQT_EXE)
                 --no-system-d3d-compiler
                 --no-system-dxc-compiler
                 --no-opengl-sw
-                --exclude-plugins qsvg,qsvgicon,qtuiotouchplugin
+                --exclude-plugins qtuiotouchplugin
+                --include-plugins qsvg,qsvgicon
                 "$<TARGET_FILE:ltool>"
         COMMENT "windeployqt: 部署 Qt 运行库到输出目录"
         VERBATIM
@@ -533,6 +541,9 @@ add_custom_command(TARGET ltool POST_BUILD
     COMMAND "${CMAKE_COMMAND}" -E copy_if_different
             "${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/share/openssl/copyright"
             "$<TARGET_FILE_DIR:ltool>/licenses/OpenSSL.txt"
-    COMMENT "copy 7zip / bit7z / OpenSSL 许可证原文"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${qlementine_SOURCE_DIR}/LICENSE"
+            "$<TARGET_FILE_DIR:ltool>/licenses/Qlementine-MIT.txt"
+    COMMENT "copy 第三方许可证原文"
     VERBATIM
 )

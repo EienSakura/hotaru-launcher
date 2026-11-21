@@ -57,31 +57,9 @@ SilentInstallLog::SilentInstallLog(QWidget* parent)
     : QDialog(parent)
 {
     setWindowTitle("静默安装日志");
+    setObjectName(QStringLiteral("installLogDialog"));
     setModal(false);
     resize(780, 460);
-    // 这扇窗是启动时建一次、之后反复 show/hide 复用的，所以走 Theme::bind：
-    // 直接 setStyleSheet 的话，他拨完「日间」再打开它，里面还是一片黑。
-    Theme::bind(this, R"QSS(
-QDialog, QWidget { background: @window; }
-QLabel { color: @text; background: transparent; }
-QLabel#muted { color: @muted; }
-QListWidget {
-    background: @base; border: 1px solid @line; border-radius: 8px;
-    color: @text; outline: none;
-}
-QListWidget::item { padding: 6px 8px; border-radius: 6px; }
-QListWidget::item:selected { background: @selBg; }
-QPlainTextEdit {
-    background: @base; border: 1px solid @line; border-radius: 8px;
-    color: @okText; font-family: Consolas, monospace; font-size: 9pt;
-}
-QPushButton {
-    background: @button; color: @text; border: 1px solid @borderHi;
-    border-radius: 8px; padding: 6px 14px;
-}
-QPushButton:hover { background: @hover; }
-)QSS");
-
     auto* lay = new QVBoxLayout(this);
     lay->setContentsMargins(12, 12, 12, 12);
     lay->setSpacing(8);
@@ -97,6 +75,7 @@ QPushButton:hover { background: @hover; }
     m_jobList = new QListWidget(this);
     m_jobList->setMaximumWidth(260);
     m_log = new QPlainTextEdit(this);
+    m_log->setObjectName(QStringLiteral("installLogOutput"));
     m_log->setReadOnly(true);
     m_log->setMaximumBlockCount(4000);
     split->addWidget(m_jobList, 0);
@@ -127,6 +106,7 @@ QPushButton:hover { background: @hover; }
         QDesktopServices::openUrl(QUrl::fromLocalFile(jobs()[i].dir));
     });
 
+    Theme::bindModal(this, true);
     rebuildJobs();
     if (!jobs().isEmpty())
         selectRow(rowOf(jobs().last().id));

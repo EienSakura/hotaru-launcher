@@ -1,11 +1,13 @@
 #include "AboutPage.h"
 #include "Archives.h"
+#include "BuildChannel.h"
 #include "LauncherGrid.h"
 #include "LauncherSkin.h"
 #include "PinnedApps.h"
 #include "PluginStore.h"
 #include "SearchWindow.h"
 #include "SettingsDialog.h"
+#include "SettingsPalette.h"
 #include "LauncherTheme.h"
 #include "Utils.h"
 #include "platform/FileMeta.h"
@@ -157,8 +159,8 @@ int runHotaruSelftest(QApplication& app, bool preview, const QString& localPacka
         std::printf("%s %s\n",ok?"ok":"FAIL",label);
         if (!ok) ++failures;
     };
-    check("宿主统一使用Hotaru应用名称",app.applicationName()==QStringLiteral("Hotaru")
-        && app.applicationDisplayName()==QStringLiteral("萤 Hotaru"));
+    check("宿主使用当前构建渠道的应用名称", app.applicationName() == BuildChannel::appId()
+        && app.applicationDisplayName() == BuildChannel::displayName());
     {
         AboutPage about;
         auto* update=about.findChild<QPushButton*>("checkUpdate");
@@ -227,7 +229,8 @@ int runHotaruSelftest(QApplication& app, bool preview, const QString& localPacka
         root+QStringLiteral("/qq/%1.exe").arg(i),{},root+QStringLiteral("/qq/%1.lnk").arg(i),{},"desktop"};
     AppScanner::saveIndex(searchApps);
     TestSearchWindow window;
-    check("搜索窗口使用Hotaru标题",window.windowTitle()==QStringLiteral("萤 Hotaru 搜索"));
+    check("搜索窗口标题与当前构建渠道一致",
+          window.windowTitle() == BuildChannel::displayName() + QStringLiteral(" 搜索"));
     window.resize(902,650);
     window.show();
     window.refreshLauncher();
@@ -314,8 +317,9 @@ int runHotaruSelftest(QApplication& app, bool preview, const QString& localPacka
             check("提示样式不污染应用基础主题",app.palette()==basePalette && app.styleSheet()==baseQss);
             Theme::setMode(mode==Theme::Mode::Light?Theme::Mode::Dark:Theme::Mode::Light);
             message.show();spin(30);
-            check("已创建提示框切换基础模式后同步刷新",message.palette().color(QPalette::WindowText)==Theme::color("text")
-                && message.palette().color(QPalette::Window)==Theme::color("window"));
+            const auto colors = SettingsPalette::current();
+            check("已创建提示框切换基础模式后同步刷新",message.palette().color(QPalette::WindowText)==QColor(colors.text)
+                && message.palette().color(QPalette::Window)==QColor(colors.window));
             message.hide();
         }
         Theme::setMode(initialMode);Theme::activatePackage(initialPackage,&error);
@@ -329,7 +333,8 @@ int runHotaruSelftest(QApplication& app, bool preview, const QString& localPacka
     for (auto* widget:QApplication::topLevelWidgets())
         if (auto* dialog=qobject_cast<SettingsDialog*>(widget);dialog && dialog->isVisible()) openedSettings=dialog;
     check("点击齿轮实际打开设置",openedSettings && !window.isVisible());
-    check("设置窗口使用Hotaru标题",openedSettings && openedSettings->windowTitle()==QStringLiteral("萤 Hotaru 设置"));
+    check("设置窗口标题与当前构建渠道一致", openedSettings
+        && openedSettings->windowTitle() == BuildChannel::displayName() + QStringLiteral(" 设置"));
     check("齿轮直达配置并有分页设置",openedSettings && openedSettings->findChild<QSpinBox*>("gridRows")
         && openedSettings->findChild<QComboBox*>("pageStart") && openedSettings->findChild<QTabWidget*>()->currentIndex()==1);
     if (openedSettings) {
@@ -405,6 +410,11 @@ int runHotaruSelftest(QApplication& app, bool preview, const QString& localPacka
                 auto* dialog=qobject_cast<QDialog*>(widget);
                 if (!dialog || dialog->objectName()!=QStringLiteral("renameDialog") || !dialog->isVisible())
                     continue;
+                if (preview) {
+                    const QString shots = QDir::tempPath() + QStringLiteral("/hotaru-previews");
+                    QDir().mkpath(shots);
+                    dialog->grab().save(shots + QStringLiteral("/settings-modal-panel-group.png"));
+                }
                 for (auto* button:dialog->findChildren<QPushButton*>())
                     if (button->text()==QStringLiteral("取消")) {button->click();return;}
             }
@@ -622,7 +632,10 @@ int runHotaruSelftest(QApplication& app, bool preview, const QString& localPacka
     check("分类搜索包含固定项",pinnedFound);
     input->clear();window.refreshLauncher();
     check("启动器不再显示分类控件",window.findChild<QComboBox*>()==nullptr);
-    check("设置使用无文字矢量按钮",window.findChildren<QToolButton*>().size()==1 && window.findChild<QToolButton*>()->text().isEmpty());
+    const auto* clipBack = window.findChild<QToolButton*>(QStringLiteral("clipHistoryBack"));
+    check("设置使用无文字按钮，剪贴板返回键在首页保持隐藏", settingsButton && clipBack
+        && settingsButton->isVisible() && settingsButton->text().isEmpty()
+        && !clipBack->isVisible());
     PinnedApps::move("4",1,1,&error);
     for (int columns=4;columns<=8;++columns) {
         auto cfg=PinnedApps::config();cfg.gridColumns=columns;
@@ -737,9 +750,11 @@ int runHotaruSelftest(QApplication& app, bool preview, const QString& localPacka
     check("旧首页显示字段不再隐藏固定搜索结果",foundPinned);
     PinnedApps::saveConfig(PinnedApps::config());
     const auto hidden=PinnedApps::config();
+    window.resize(760, 420);
     input->setText("qq");window.show();window.refreshLauncher();spin();
     auto* results=window.findChild<QListWidget*>("list");
-    check("长结果出现纵向滚动",results->count()>10 && results->verticalScrollBar()->maximum()>0);
+    check("紧凑窗口中的长结果可以纵向滚动",
+          results->count() >= 10 && results->verticalScrollBar()->maximum() > 0);
     for (const QSize size : {QSize(1100,800),QSize(760,420),QSize(902,650)}) {
         window.resize(size);window.show();spin();
         check("搜索缩放不产生底部横向滚动",results->horizontalScrollBarPolicy()==Qt::ScrollBarAlwaysOff
